@@ -1,19 +1,45 @@
 #RequireContext CSmAction
 
+#Include "MathLib" as ML
+
 // =====================================================================
-// Trampoline action — encoding v2. FROZEN once built into the Gbx.
-// The mode arms us via ActionSetVariant (Variant == 0 = disarmed):
-//   Variant = 10000 + Up*1000 + Down*100 + Compass*10 + Horiz
+// Trampoline action — encoding v3. FROZEN once built into the Gbx.
+// The mode arms us via ActionSetVariant (0 = disarmed). Read Variant only
+// through its low 16 bits (see "Armed" in main): the high half of the word
+// holds EnergyMax, so the raw value is never 0 and never in range.
+//   Armed = Base + Up*1000 + Down*100 + Dir*10 + Horiz
 //   Up/Down/Horiz = blast strength 0..9 (0 = no bullet on that component)
-//   Compass = 0..7 -> C_CompassDir (index i = i*45 deg from +Z toward +X).
-// N<->world calibration and the both-vertical policy live MODE-SIDE
-// (Constants::C_TrampolineCompass*, C_TrampolineAllowBothVertical), so
-// this Gbx never needs a rebuild for calibration or policy changes.
-// C_VariantBase must match Constants::C_TrampolineVariantBase.
+//   Base 10000 (C_VariantBase)    -> Dir 0..7 is a WORLD direction, straight
+//                                    out of C_CompassDir (index i = i*45 deg
+//                                    from +Z toward +X). Trampoline pads.
+//   Base 20000 (C_VariantBaseRel) -> Dir 0..7 is RELATIVE to where the owner
+//                                    looks: their aim yaw turned by i*45 deg,
+//                                    in the same rotation sense. Dir 0 is
+//                                    straight ahead. The mode's key-triggered
+//                                    launch abilities.
+// Rotation sense, N<->world calibration and the both-vertical policy live
+// MODE-SIDE (Constants::C_TrampolineCompass*, C_LaunchRelativeMirror,
+// C_TrampolineAllowBothVertical), so this Gbx never needs a rebuild for
+// calibration or policy changes.
+// C_VariantBase / C_VariantBaseRel must match
+// Constants::C_TrampolineVariantBase / C_TrampolineVariantBaseRelative.
 // State_Boolean1 = already fired (reset when the mode zeroes the variant).
+// State_Integer1 = gauge initialized (see main): an instance the mode binds
+// to a key must be activatable, or the press never reaches the mode.
+// State_Integer2 = IsActive on the previous tick, for the press echo.
 // =====================================================================
-#Const C_VariantBase 10000
-#Const C_VariantMax  19979	// base + 9*1000 + 9*100 + 7*10 + 9
+#Const C_VariantBase    10000
+#Const C_VariantMax     19989	// base + 9*1000 + 9*100 + 9*10 + 9
+#Const C_VariantBaseRel 20000
+#Const C_VariantMaxRel  29989
+
+// Bound instances are gated by their energy gauge and cooldown, so give them a
+// free self-reloading one (pattern proven by Actions/Sneak.Script.txt). Firing
+// itself stays variant-driven and unaffected — this only decides whether pressing
+// the key registers at all. The small cooldown just thins out input events; the
+// launch cooldown the mapper sets is enforced mode-side.
+#Const C_BoundCooldown	100
+#Const C_BoundEnergy		6400
 
 // Projectile models, index = strength - 1. All: self-exploding (very short
 // lifetime), Blow Radius Attenuation 0 (position-independent force).
@@ -39,6 +65,8 @@
 
 // Compass table: index i = i*45 deg, rotating from world +Z toward +X.
 // Which index the editor's "N" means is the mode's business, not ours.
+// Relative launches (C_VariantBaseRel) use the same steps around the owner's
+// aim instead of around +Z, computed continuously below.
 #Const C_CompassDir [
 	<0., 0., 1.>,  <0.7071, 0., 0.7071>,   <1., 0., 0.>,  <0.7071, 0., -0.7071>,
 	<0., 0., -1.>, <-0.7071, 0., -0.7071>, <-1., 0., 0.>, <-0.7071, 0., 0.7071>
@@ -61,22 +89,60 @@ Ident GetProjectileId(Text _ModelName) {
 }
 
 main() {
-	if (Variant == 0) {
+	// First tick: make this instance usable as a bound key (harmless when unbound)
+	if (State_Integer1 != 1) {
+		State_Integer1 = 1;
+		Cooldown = C_BoundCooldown;
+		EnergyMax = C_BoundEnergy;
+		EnergyCost = 0;
+		EnergyReload = True;
+		Energy = EnergyMax;
+	}
+
+	// A bound instance is a key-triggered launch ability: report the key press to the mode
+	// ourselves. The engine's mode-side OnActionEvent is not delivered for custom actions —
+	// Nadeo's shield action and Actions/Sneak.Script.txt report activation the same way. The
+	// mode maps the echo back to a key through the event's ShooterActionSlot. Pad instances
+	// are never bound, so they never send this.
+	// State_Integer2 = IsActive on the previous tick.
+	if (IsBound) {
+		declare WasActive = State_Integer2 == 1;
+		if (IsActive && !WasActive) {
+			State_Integer2 = 1;
+			SendRulesEvent("trampoline", ["press"], Owner, Null);
+		} else if (!IsActive && WasActive) {
+			State_Integer2 = 0;
+		}
+	}
+
+	// What the mode armed us with. ActionSetVariant writes only the low 16 bits of the word
+	// Variant reads back — its high half holds EnergyMax — so an instance with a gauge reads
+	// EnergyMax*65536 + the value the mode wrote. Without masking that off, this action reads
+	// e.g. 419445400 for a launch of 15000: never 0, so the fired-latch below never resets, and
+	// never in range, so it echoes without ever creating a projectile.
+	declare Armed = Variant % 65536;
+
+	if (Armed == 0) {
 		State_Boolean1 = False;
 	} else if (!State_Boolean1 && Owner != Null && Owner.SpawnStatus == CSmPlayer::ESpawnStatus::Spawned) {
 		State_Boolean1 = True;
 
 		// Echo the fired variant to the mode: it disarms us (resets the variant) and closes the PvP window
-		SendRulesEvent("trampoline", [""^Variant], Owner, Null);
+		SendRulesEvent("trampoline", [""^Armed], Owner, Null);
 
-		if (Variant >= C_VariantBase && Variant <= C_VariantMax) {
-			declare Packed  = Variant - C_VariantBase;
+		declare Relative = Armed >= C_VariantBaseRel && Armed <= C_VariantMaxRel;
+		if ((Armed >= C_VariantBase && Armed <= C_VariantMax) || Relative) {
+			declare Base = C_VariantBase;
+			if (Relative) {
+				Base = C_VariantBaseRel;
+			}
+			declare Packed  = Armed - Base;
 			declare Up      = Packed / 1000;
 			declare Down    = (Packed / 100) % 10;
-			declare Compass = (Packed / 10) % 10;
+			declare Dir     = (Packed / 10) % 10;
 			declare Horiz   = Packed % 10;
-			if (Compass > 7) {
-				Compass = 0;	// defensive: the encoder never sends 8/9
+			if (Dir > 7) {
+				Dir = 0;	// defensive: only 0..7 is ever sent
 			}
 
 			declare LastProjectileId = NullId;
@@ -84,7 +150,17 @@ main() {
 			// Horizontal push: self-exploding bullet beside the player,
 			// opposite the launch direction, aimed/moving outward.
 			if (Horiz > 0) {
-				declare LaunchDir = C_CompassDir[Compass];
+				declare LaunchDir = C_CompassDir[Dir];
+				if (Relative) {
+					// Continuous version of the compass table, turned by the picked step:
+					// the horizontal yaw the owner is looking at, plus Dir*45 deg. Sin/Cos
+					// of the yaw avoids normalizing (the flattened aim shrinks as the player
+					// looks up or down); looking exactly straight up or down leaves Atan2 at
+					// 0, so the push falls back to the step measured from +Z instead of
+					// collapsing to nothing.
+					declare Yaw = ML::Atan2(Owner.AimDirection.X, Owner.AimDirection.Z) + Dir * (ML::PI() / 4.);
+					LaunchDir = <ML::Sin(Yaw), 0., ML::Cos(Yaw)>;
+				}
 				declare Out = <-LaunchDir.X, 0., -LaunchDir.Z>;
 				declare Position = Owner.Position + <Out.X * C_HorizontalOffset, C_HorizontalHeight, Out.Z * C_HorizontalOffset>;
 				LastProjectileId = Projectile_CreateAtLocation(GetProjectileId(C_HorizontalProjectiles[Horiz - 1]), Null, Position, Out, Out);

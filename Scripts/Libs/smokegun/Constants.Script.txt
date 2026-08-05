@@ -10,7 +10,6 @@
 // Items
 #Const C_ItemOffzone "Obstacle\\OffzoneShield.Item.gbx"
 #Const C_ItemAmmo "Obstacle\\Ammo.Item.gbx"
-#Const C_ItemTrampoline "Obstacle\\Trampoline.Item.gbx"
 #Const C_InvisibleSkin "Skins\\Models\\ArenaPlayer\\Invisible.zip"
 #Const C_ObstacleModel "Items\\Speed.Item.Gbx"
 
@@ -71,9 +70,12 @@
 #Const C_Score_Normal 0
 #Const C_Score_Survival 1
 
-// Trampoline (encoding v2: variant = base + up*1000 + down*100 + compass*10 + horiz;
-// must match C_VariantBase in Actions/Trampoline.Script.txt)
-#Const C_TrampolineVariantBase 10000
+// Trampoline (encoding v3: variant = base + up*1000 + down*100 + dir*10 + horiz;
+// must match C_VariantBase / C_VariantBaseRel in Actions/Trampoline.Script.txt).
+// The base picks the frame the dir digit is read in: the world compass table for pads,
+// the player's own aim for the key-triggered launch abilities.
+#Const C_TrampolineVariantBase 10000			// dir 0..7 = world compass step (pads)
+#Const C_TrampolineVariantBaseRelative 20000	// dir 0..7 = 45 deg step from the owner's aim (launch keys)
 #Const C_TrampolineDefaultUp 5
 #Const C_TrampolineDefaultDown 0
 #Const C_TrampolineDefaultCompass 0
@@ -81,6 +83,11 @@
 #Const C_TrampolineDefaultWaitGround False	// True: hold the launch until the player also touches the ground
 #Const C_TrampolineDefaultDelay 0			// ms of continuous pad contact required before the launch
 #Const C_TrampolineDelayMax 10000			// clamp ceiling for Meta_TrampolineDelay (ms)
+// The cooldown a pad sets when it fires is shared by every pad: until it passes, no trampoline
+// launches that player again. 0 relaunches on every touch tick of the pad the player stands on.
+#Const C_TrampolineDefaultCooldown 500		// ms of pad-wide silence after a launch
+#Const C_TrampolineCooldownMax 10000		// clamp ceiling for Meta_TrampolineCooldown (ms)
+#Const C_TrampolineWaitGroundDelayPrefill 25	// editor convenience: delay ticking "wait until touching ground" prefills (ms), only when the current delay is shorter
 #Const C_TrampolineTouchResetGap 400		// ms without touch events after which the delay timer resets
 #Const C_TrampolineTouchMaxDist 6.			// arming guard: must span the item's TriggerShape reach (a 6x6 pad corner is ~4.24m) yet stay < a respawn distance
 #Const C_TrampolineAllowBothVertical True	// False: up > 0 suppresses the down blast
@@ -91,3 +98,87 @@
 // echo confirms the blast has landed (bullets explode immediately), collapses to a short tail.
 #Const C_TrampolinePvPMaxMs 300				// safety cap: window can't stay open longer than this after arming (used if no fire echo arrives)
 #Const C_TrampolinePvPPostFireMs 0			// extra ms to hold PvP open past the fire echo. 0 is safe for immediate-explosion bullets (blow already landed by echo time; a 1-tick cushion remains from the strict close) — only raise it if a bullet gets a delayed detonation
+#Const C_TrampolineVariantPackedMax 9989	// tolerant ceiling for a packed payload: up 9, down 9, dir 0..7, side 9
+
+// Launch abilities: the same launch, triggered by the player on keys 1-4 instead of by a pad.
+// A checkpoint (or the start spawn) grants and configures them for its section; the mode binds
+// one action slot per granted key and arms it with a trampoline variant when the key is pressed.
+#Const C_LaunchKeyCount 4					// keys 1..4 = EActionInput::Activable1..4 = action Slot_E..Slot_H
+// One action model per key — byte-identical copies of Trampoline.Action.Gbx. This is what makes
+// several keys work at once: a bound action's press echo carries no slot and no key (every
+// identity the event does carry is Slot_A), but it does carry the *model* name in Event.ActionId,
+// so giving each key its own copy of the file turns the echo into an exact key id. Rebuild them
+// with `cp Trampoline.Action.Gbx TrampolineKeyN.Action.Gbx` whenever the action Gbx changes; the
+// copies need no separate authoring, only distinct names. Index 0 = key 1.
+#Const C_LaunchActionModels [
+	"TrampolineKey1.Action.Gbx",
+	"TrampolineKey2.Action.Gbx",
+	"TrampolineKey3.Action.Gbx",
+	"TrampolineKey4.Action.Gbx"
+]
+// The launch direction is always relative to where the player looks: dir 0..7 = Forward,
+// Forward-Right, Right, Back-Right, Back, Back-Left, Left, Forward-Left, as the editor's
+// arrow picker lays them out. The action turns the owner's aim yaw by dir*45 deg.
+#Const C_LaunchRelativeMirror True			// calibration: flip the rotation sense (the picker's "right" comes out left in-game).
+											// Separate from C_TrampolineCompassMirror on purpose: pads and keys can be fixed apart.
+#Const C_LaunchDefaultOn False				// per-key defaults, shared by the editor dialog and the mode
+#Const C_LaunchDefaultUp 5
+#Const C_LaunchDefaultDown 0
+#Const C_LaunchDefaultSide 0
+#Const C_LaunchDefaultDir 0					// 0 = straight ahead
+#Const C_LaunchDefaultCooldown 500			// ms between two launches on the same key
+#Const C_LaunchDefaultGround False			// True: refuse to launch while airborne
+#Const C_LaunchCooldownMax 10000			// clamp ceiling for Meta_Launch*_Cooldown (ms)
+// How a key press reaches the mode: the action reports its own activation (SendRulesEvent
+// "press" -> OnActionCustomEvent), the way Nadeo's key-bound shield action and
+// Actions/Sneak.Script.txt do, and the mode reads the key off Event.ActionId. The two
+// alternatives were tried in-game and are dead ends, recorded here so they aren't rebuilt:
+//   - the engine's OnActionEvent does carry the key (EActionInput::Activable1..4) but is
+//     delivered ONLY for inputs with no action bound, so it never reports a usable ability;
+//   - polling each slot's cooldown stamp never moves: a Cooldown the action script sets is
+//     reported by Action_GetState but never actually starts (CooldownStartTime stays -1, and
+//     Action_GetRemainingCooldown stays 0).
+// Which action slot actually fires a key launch. A key launch is the very same launch a pad
+// fires, so routing it through the pad slot (Slot_D) costs nothing and keeps one firing
+// instance per player: the key slots (Slot_E..H) then only carry the bind — HUD icon and
+// press echo. Introduced while a bound slot was suspected of dropping variant writes; that
+// turned out not to be the bug (an unmasked Variant read was), so either setting works.
+//   True  = arm Slot_D on a key press (pads and keys share one firing instance).
+//   False = arm the key's own slot.
+#Const C_LaunchFireOnPadSlot True
+
+// All trampoline launch-pad items (Normal + Small size families under Items\Trampolines).
+// Registered in Items::LoadItems so they spawn at roundstart; runtime + editor
+// recognise any of them via the "Trampoline" substring in the item name/path.
+#Const C_TrampolineItems [
+	"Trampolines\\1. Small\\0.5 x Y\\0-5 x 0-5 Trampoline Small.Item.gbx",
+	"Trampolines\\1. Small\\1 x Y\\1 x 0-5 Trampoline Small.Item.gbx",
+	"Trampolines\\1. Small\\1 x Y\\1 x 1 Trampoline Small.Item.gbx",
+	"Trampolines\\1. Small\\2 x Y\\2 x 0-5 Trampoline Small.Item.gbx",
+	"Trampolines\\1. Small\\2 x Y\\2 x 1 Trampoline Small.Item.gbx",
+	"Trampolines\\1. Small\\2 x Y\\2 x 2 Trampoline Small.Item.gbx",
+	"Trampolines\\1. Small\\4 x Y\\4 x 0-5 Trampoline Small.Item.gbx",
+	"Trampolines\\1. Small\\4 x Y\\4 x 1 Trampoline Small.Item.gbx",
+	"Trampolines\\1. Small\\4 x Y\\4 x 2 Trampoline Small.Item.gbx",
+	"Trampolines\\1. Small\\6 x Y\\6 x 0-5 Trampoline Small.Item.gbx",
+	"Trampolines\\1. Small\\6 x Y\\6 x 1 Trampoline Small.Item.gbx",
+	"Trampolines\\1. Small\\6 x Y\\6 x 2 Trampoline Small.Item.gbx",
+	"Trampolines\\1. Small\\8 x Y\\8 x 0-5 Trampoline Small.Item.gbx",
+	"Trampolines\\1. Small\\8 x Y\\8 x 1 Trampoline Small.Item.gbx",
+	"Trampolines\\1. Small\\8 x Y\\8 x 2 Trampoline Small.Item.gbx",
+	"Trampolines\\2. Normal\\1 x Y\\1 x 1 Trampoline.Item.gbx",
+	"Trampolines\\2. Normal\\2 x Y\\2 x 1 Trampoline.Item.gbx",
+	"Trampolines\\2. Normal\\2 x Y\\2 x 2 Trampoline.Item.gbx",
+	"Trampolines\\2. Normal\\4 x Y\\4 x 1 Trampoline.Item.gbx",
+	"Trampolines\\2. Normal\\4 x Y\\4 x 2 Trampoline.Item.gbx",
+	"Trampolines\\2. Normal\\4 x Y\\4 x 4 Trampoline.Item.gbx",
+	"Trampolines\\2. Normal\\6 x Y\\6 x 1 Trampoline.Item.gbx",
+	"Trampolines\\2. Normal\\6 x Y\\6 x 2 Trampoline.Item.gbx",
+	"Trampolines\\2. Normal\\6 x Y\\6 x 4 Trampoline.Item.gbx",
+	"Trampolines\\2. Normal\\6 x Y\\6 x 6 Trampoline.Item.gbx",
+	"Trampolines\\2. Normal\\8 x Y\\8 x 1 Trampoline.Item.gbx",
+	"Trampolines\\2. Normal\\8 x Y\\8 x 2 Trampoline.Item.gbx",
+	"Trampolines\\2. Normal\\8 x Y\\8 x 4 Trampoline.Item.gbx",
+	"Trampolines\\2. Normal\\8 x Y\\8 x 6 Trampoline.Item.gbx",
+	"Trampolines\\2. Normal\\8 x Y\\8 x 8 Trampoline.Item.gbx"
+]

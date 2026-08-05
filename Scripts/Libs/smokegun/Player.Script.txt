@@ -219,6 +219,23 @@ Void setV2PortalCache(CSmPlayer _Player, Ident _Value) {
 }
 
 
+/**
+ * Landmark whose settings govern the section the player is currently running: the last
+ * checkpoint they captured, or the spawn they restarted from before the first one. Set
+ * wherever the section effects are applied (see ObstacleLib Private_CheckpointEffect /
+ * Private_RestartEffect), so it follows captures, respawns, cp jumps and portals alike.
+ */
+Ident GetSectionAnchor(CSmPlayer _Player) {
+    declare Ident SectionAnchor for _Player = NullId;
+    return SectionAnchor;
+}
+
+Void SetSectionAnchor(CSmPlayer _Player, Ident _Value) {
+    declare Ident SectionAnchor for _Player = NullId;
+    SectionAnchor = _Value;
+}
+
+
 Vec3 getLastSpawnPosition(CSmPlayer _Player) {
     declare Vec3 Net_LastSpawnPosition for _Player = <0., 0., 0.>;
     return Net_LastSpawnPosition;

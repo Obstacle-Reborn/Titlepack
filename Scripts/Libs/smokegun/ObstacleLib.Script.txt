@@ -379,6 +379,9 @@ Void Private_RestartEffect(CSmPlayer _Player, Ident _SpawnId) {
     declare MapVersion = Map::GetMapTypeVersion();
     declare Spawn <=> MapLandmarks[_SpawnId];
 
+    // The spawn governs the run's first section until the first checkpoint is captured
+    Player::SetSectionAnchor(_Player, _SpawnId);
+
     if (MapVersion <= 2) {
         declare WeaponType = Tools::GetWeaponTypeFromSpawn(Spawn);
         Weapons::ApplyWeaponForCheckpointType(_Player, WeaponType);
@@ -607,6 +610,9 @@ Void Private_CheckpointEffect(CSmPlayer _Player, Ident _CheckpointId) {
     declare MapVersion = Map::GetMapTypeVersion();
     declare Checkpoint <=> MapLandmarks[_CheckpointId];
     declare CheckpointName = Checkpoint.Tag;
+
+    // This checkpoint governs the section the player now runs (until the next one)
+    Player::SetSectionAnchor(_Player, _CheckpointId);
 
     if (MapVersion <= 2) {
         if (TL::Length(CheckpointName) > 10) {

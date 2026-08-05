@@ -5,8 +5,34 @@
 #Include "Libs/miltant/Nadeo_Fork/MapType.Script.txt" as MapType
 #Include "Libs/smokegun/Constants.Script.txt" as Constants
 
+// Launch abilities: a checkpoint (or spawn) holds one independent config per key 1..4, and
+// metadata names can't be composed at runtime, so all four blocks are spelled out once in
+// LaunchMetaRead/LaunchMetaWrite and every caller trades an Integer[] of these fields with
+// them (booleans travel as 0/1).
+#Const C_LaunchFieldOn 0
+#Const C_LaunchFieldUp 1
+#Const C_LaunchFieldDown 2
+#Const C_LaunchFieldSide 3
+#Const C_LaunchFieldDir 4
+#Const C_LaunchFieldCooldown 5
+#Const C_LaunchFieldGround 6
+#Const C_LaunchFieldCount 7
+
+// The eight launch directions, laid out clockwise from "straight ahead" — they are relative to
+// where the player looks, not compass directions, so the picker shows arrows (up = forward) and
+// the mode turns the player's aim by Dir*45 deg.
+// Mid line of the direction picker bar: the clip window and every arrow are centred on it, so a
+// rotated arrow stays on the same spot instead of drifting up or down.
+#Const C_LaunchDirBarMid "-2.55"
+#Const C_LaunchDirIdPrefix "LaunchDir"
+
 declare Ident G_LastAnchorId;
 declare Ident[] G_AnchorCache;
+
+// Which anchor + key the launch sub-window is currently editing (key 0 = not open). Saves are
+// gated on the anchor still matching, so a page dying mid-switch can't write onto another one.
+declare Ident G_LaunchEditAnchor;
+declare Integer G_LaunchEditKey;
 
 declare Text G_CurrentWindow;
 
@@ -169,6 +195,42 @@ Text Select8(Text _Position, Text _Option1, Text _Option2, Text _Option3, Text _
     """;
 }
 
+// Same bar as Select8, but the options are arrows instead of words: one arrow icon turned by
+// 45° per slot (clockwise from "straight ahead"). The icon quad is used rather than an arrow
+// character because the editor font has no diagonal arrows (they render as empty rhombuses) and
+// its glyphs are not centred in their box, which throws a rotated arrow off its slot.
+// Ids are _IdPrefix ^ index (0..7), so the click handler reads the picked index off the id.
+Text Select8Arrows(Text _Position, Text _IdPrefix, Text _Selector)
+{
+    declare Options = "";
+    for (Index, 0, 7) {
+        declare ArrowId = _IdPrefix ^ Index;
+        declare ArrowX = ""^(-35 + Index * 10);
+        // The icon points right, so slot 0 ("straight ahead") starts a quarter turn back.
+        declare ArrowRot = ""^(Index * 45 - 90);
+        // The turn is applied to a wrapper frame, not to the quad: a rotated control spins around
+        // its position anchor, while a frame spins around its own origin - which the centred quad
+        // sits exactly on, so every arrow turns in place. The quad stays small enough that its
+        // rotated corners keep clear of the clip window.
+        Options ^= """
+            <frame pos="{{{ArrowX}}} {{{C_LaunchDirBarMid}}}" rot="{{{ArrowRot}}}" z-index="1">
+                <quad id="{{{ArrowId}}}" pos="0 0" size="4 4" halign="center" valign="center"
+                    keepratio="Fit" style="UIConstruction_Buttons" substyle="Right" scriptevents="1"/>
+            </frame>
+        """;
+    }
+
+    return """
+        <frame pos="{{{_Position}}}">
+            <frame clip="True" clipposn="0 {{{C_LaunchDirBarMid}}}" clipsizen="80 6" halign="center">
+                {{{Options}}}
+                <quad  id="{{{_Selector}}}" pos="-40 1"   size="10 7" bgcolor="4777C1FF"/>
+            </frame>
+            <quad pos="0 0.5" size="81 6.1" bgcolor="797979AA" halign="center"/>
+        </frame>
+    """;
+}
+
 Text Entry(Text _Position, Text _Entry)
 {
     return """
@@ -196,6 +258,19 @@ Text Property(Text _Position, Text _Title, Text _Content)
         <frame pos="{{{_Position}}}">
             <label pos="0 0" size="20 5" text="{{{_Title}}}" textsize="2"
                 halign="center" valign="center2" class="text"/>
+            {{{_Content}}}
+        </frame>
+    """;
+}
+
+// Property with the title on the same row as the content, right-aligned just left of it.
+// _Position is the row centre line, so the content is placed around y = 0, not below it.
+Text InlineProperty(Text _Position, Text _Title, Text _Content)
+{
+    return """
+        <frame pos="{{{_Position}}}">
+            <label pos="-13 0" size="25 5" text="{{{_Title}}}" textsize="2"
+                halign="right" valign="center2" class="text"/>
             {{{_Content}}}
         </frame>
     """;
@@ -302,6 +377,51 @@ Text MakeWindowWithoutEnabled(Text _Title, Text _Content)
         {{{_Content}}}
     </frame>
     <quad pos="-45 45" size="90 115" bgcolor="000000AA" scriptevents="1" id="Window_Background"/>
+</frame>
+    """;
+}
+
+// MakeWindow variants for the two dialogs that carry the launch row: taller background so the
+// row fits under the stamina block, and a header "back" button for the launch sub-window.
+Text MakeWindowTall(Text _Title, Text _Content, Boolean _WithTest)
+{
+    declare TestButton = "";
+    if (_WithTest) {
+        TestButton = LittleButton("-40 25", "", "Label_Test");
+    }
+    return """
+<frame pos="125 20" scale="0.75" z-index="-1">
+    <frame>
+        <label pos="0 40" size="75 10" class="text" text="{{{_Title}}}" textsize="5" halign="center" valign="center2"/>
+        <label pos="41.5 41.5" size="7 7" valign="center" halign="center" scriptevents="1" scriptaction="Close"
+                   text="❌" focusareacolor2="FF0000FF" textsize="2" focusareacolor1="0000" />
+        {{{Select2("0 32.6", "Enable", "Disable", "Enabled_Selector")}}}
+        {{{LittleButton("-40 40.2", "", "Label_Copy")}}}
+        {{{LittleButton("-40 32.6", "", "Label_Paste")}}}
+        {{{TestButton}}}
+    </frame>
+    <frame id="properties" pos="0 10">
+        {{{_Content}}}
+    </frame>
+    <quad pos="-45 45" size="90 134" bgcolor="000000AA" scriptevents="1" id="Window_Background"/>
+</frame>
+    """;
+}
+
+Text MakeWindowWithBack(Text _Title, Text _Content)
+{
+    return """
+<frame pos="125 20" scale="0.75" z-index="-1">
+    <frame>
+        <label pos="0 40" size="75 10" class="text" text="{{{_Title}}}" textsize="5" halign="center" valign="center2"/>
+        <label pos="41.5 41.5" size="7 7" valign="center" halign="center" scriptevents="1" scriptaction="Close"
+                   text="❌" focusareacolor2="FF0000FF" textsize="2" focusareacolor1="0000" />
+        {{{LittleButton("-40 40.2", "⏴", "Launch_Back")}}}
+    </frame>
+    <frame id="properties" pos="0 10">
+        {{{_Content}}}
+    </frame>
+    <quad pos="-45 45" size="90 103" bgcolor="000000AA" scriptevents="1" id="Window_Background"/>
 </frame>
     """;
 }
@@ -480,6 +600,242 @@ Void SaveWeaponPageVariables(CAnchorData _Anchor)
     declare Real Stamina_Amount for ManialinkPage;
 
     SaveWeaponVariables(_Anchor, Weapon, Weapon_Gain, Weapon_Amount, Stamina, Stamina_Gain, Stamina_Amount);
+}
+
+
+Integer LaunchFlag(Boolean _Value)
+{
+    if (_Value) {
+        return 1;
+    }
+    return 0;
+}
+
+/**
+ * Launch settings of one key on one anchor, as [On, Up, Down, Side, Dir, Cooldown, Ground]
+ * (see the C_LaunchField* indices). Defaults come from the shared Constants, so the
+ * mode reads exactly what the editor would show for an anchor that was never edited.
+ *
+ * All four key blocks are declared up front — metadata names can't be built at runtime, and
+ * keeping the declares at function scope is what every other dialog here does.
+ */
+Integer[] LaunchMetaRead(CAnchorData _Anchor, Integer _Key)
+{
+    declare metadata Meta_Launch1_On for _Anchor = Constants::C_LaunchDefaultOn;
+    declare metadata Meta_Launch1_Up for _Anchor = Constants::C_LaunchDefaultUp;
+    declare metadata Meta_Launch1_Down for _Anchor = Constants::C_LaunchDefaultDown;
+    declare metadata Meta_Launch1_Side for _Anchor = Constants::C_LaunchDefaultSide;
+    declare metadata Meta_Launch1_Dir for _Anchor = Constants::C_LaunchDefaultDir;
+    declare metadata Meta_Launch1_Cooldown for _Anchor = Constants::C_LaunchDefaultCooldown;
+    declare metadata Meta_Launch1_Ground for _Anchor = Constants::C_LaunchDefaultGround;
+
+    declare metadata Meta_Launch2_On for _Anchor = Constants::C_LaunchDefaultOn;
+    declare metadata Meta_Launch2_Up for _Anchor = Constants::C_LaunchDefaultUp;
+    declare metadata Meta_Launch2_Down for _Anchor = Constants::C_LaunchDefaultDown;
+    declare metadata Meta_Launch2_Side for _Anchor = Constants::C_LaunchDefaultSide;
+    declare metadata Meta_Launch2_Dir for _Anchor = Constants::C_LaunchDefaultDir;
+    declare metadata Meta_Launch2_Cooldown for _Anchor = Constants::C_LaunchDefaultCooldown;
+    declare metadata Meta_Launch2_Ground for _Anchor = Constants::C_LaunchDefaultGround;
+
+    declare metadata Meta_Launch3_On for _Anchor = Constants::C_LaunchDefaultOn;
+    declare metadata Meta_Launch3_Up for _Anchor = Constants::C_LaunchDefaultUp;
+    declare metadata Meta_Launch3_Down for _Anchor = Constants::C_LaunchDefaultDown;
+    declare metadata Meta_Launch3_Side for _Anchor = Constants::C_LaunchDefaultSide;
+    declare metadata Meta_Launch3_Dir for _Anchor = Constants::C_LaunchDefaultDir;
+    declare metadata Meta_Launch3_Cooldown for _Anchor = Constants::C_LaunchDefaultCooldown;
+    declare metadata Meta_Launch3_Ground for _Anchor = Constants::C_LaunchDefaultGround;
+
+    declare metadata Meta_Launch4_On for _Anchor = Constants::C_LaunchDefaultOn;
+    declare metadata Meta_Launch4_Up for _Anchor = Constants::C_LaunchDefaultUp;
+    declare metadata Meta_Launch4_Down for _Anchor = Constants::C_LaunchDefaultDown;
+    declare metadata Meta_Launch4_Side for _Anchor = Constants::C_LaunchDefaultSide;
+    declare metadata Meta_Launch4_Dir for _Anchor = Constants::C_LaunchDefaultDir;
+    declare metadata Meta_Launch4_Cooldown for _Anchor = Constants::C_LaunchDefaultCooldown;
+    declare metadata Meta_Launch4_Ground for _Anchor = Constants::C_LaunchDefaultGround;
+
+    declare Integer[] Values = [
+        LaunchFlag(Constants::C_LaunchDefaultOn),
+        Constants::C_LaunchDefaultUp,
+        Constants::C_LaunchDefaultDown,
+        Constants::C_LaunchDefaultSide,
+        Constants::C_LaunchDefaultDir,
+        Constants::C_LaunchDefaultCooldown,
+        LaunchFlag(Constants::C_LaunchDefaultGround)
+    ];
+
+    switch (_Key) {
+        case 1: {
+            Values = [
+                LaunchFlag(Meta_Launch1_On), Meta_Launch1_Up, Meta_Launch1_Down,
+                Meta_Launch1_Side, Meta_Launch1_Dir,
+                Meta_Launch1_Cooldown, LaunchFlag(Meta_Launch1_Ground)
+            ];
+        }
+        case 2: {
+            Values = [
+                LaunchFlag(Meta_Launch2_On), Meta_Launch2_Up, Meta_Launch2_Down,
+                Meta_Launch2_Side, Meta_Launch2_Dir,
+                Meta_Launch2_Cooldown, LaunchFlag(Meta_Launch2_Ground)
+            ];
+        }
+        case 3: {
+            Values = [
+                LaunchFlag(Meta_Launch3_On), Meta_Launch3_Up, Meta_Launch3_Down,
+                Meta_Launch3_Side, Meta_Launch3_Dir,
+                Meta_Launch3_Cooldown, LaunchFlag(Meta_Launch3_Ground)
+            ];
+        }
+        case 4: {
+            Values = [
+                LaunchFlag(Meta_Launch4_On), Meta_Launch4_Up, Meta_Launch4_Down,
+                Meta_Launch4_Side, Meta_Launch4_Dir,
+                Meta_Launch4_Cooldown, LaunchFlag(Meta_Launch4_Ground)
+            ];
+        }
+    }
+
+    return Values;
+}
+
+
+Void LaunchMetaWrite(CAnchorData _Anchor, Integer _Key, Integer[] _Values)
+{
+    declare metadata Meta_Launch1_On for _Anchor = Constants::C_LaunchDefaultOn;
+    declare metadata Meta_Launch1_Up for _Anchor = Constants::C_LaunchDefaultUp;
+    declare metadata Meta_Launch1_Down for _Anchor = Constants::C_LaunchDefaultDown;
+    declare metadata Meta_Launch1_Side for _Anchor = Constants::C_LaunchDefaultSide;
+    declare metadata Meta_Launch1_Dir for _Anchor = Constants::C_LaunchDefaultDir;
+    declare metadata Meta_Launch1_Cooldown for _Anchor = Constants::C_LaunchDefaultCooldown;
+    declare metadata Meta_Launch1_Ground for _Anchor = Constants::C_LaunchDefaultGround;
+
+    declare metadata Meta_Launch2_On for _Anchor = Constants::C_LaunchDefaultOn;
+    declare metadata Meta_Launch2_Up for _Anchor = Constants::C_LaunchDefaultUp;
+    declare metadata Meta_Launch2_Down for _Anchor = Constants::C_LaunchDefaultDown;
+    declare metadata Meta_Launch2_Side for _Anchor = Constants::C_LaunchDefaultSide;
+    declare metadata Meta_Launch2_Dir for _Anchor = Constants::C_LaunchDefaultDir;
+    declare metadata Meta_Launch2_Cooldown for _Anchor = Constants::C_LaunchDefaultCooldown;
+    declare metadata Meta_Launch2_Ground for _Anchor = Constants::C_LaunchDefaultGround;
+
+    declare metadata Meta_Launch3_On for _Anchor = Constants::C_LaunchDefaultOn;
+    declare metadata Meta_Launch3_Up for _Anchor = Constants::C_LaunchDefaultUp;
+    declare metadata Meta_Launch3_Down for _Anchor = Constants::C_LaunchDefaultDown;
+    declare metadata Meta_Launch3_Side for _Anchor = Constants::C_LaunchDefaultSide;
+    declare metadata Meta_Launch3_Dir for _Anchor = Constants::C_LaunchDefaultDir;
+    declare metadata Meta_Launch3_Cooldown for _Anchor = Constants::C_LaunchDefaultCooldown;
+    declare metadata Meta_Launch3_Ground for _Anchor = Constants::C_LaunchDefaultGround;
+
+    declare metadata Meta_Launch4_On for _Anchor = Constants::C_LaunchDefaultOn;
+    declare metadata Meta_Launch4_Up for _Anchor = Constants::C_LaunchDefaultUp;
+    declare metadata Meta_Launch4_Down for _Anchor = Constants::C_LaunchDefaultDown;
+    declare metadata Meta_Launch4_Side for _Anchor = Constants::C_LaunchDefaultSide;
+    declare metadata Meta_Launch4_Dir for _Anchor = Constants::C_LaunchDefaultDir;
+    declare metadata Meta_Launch4_Cooldown for _Anchor = Constants::C_LaunchDefaultCooldown;
+    declare metadata Meta_Launch4_Ground for _Anchor = Constants::C_LaunchDefaultGround;
+
+    if (_Values.count < C_LaunchFieldCount) {
+        return;
+    }
+
+    declare On = _Values[C_LaunchFieldOn] == 1;
+    declare Up = ML::Clamp(_Values[C_LaunchFieldUp], 0, 9);
+    declare Down = ML::Clamp(_Values[C_LaunchFieldDown], 0, 9);
+    declare Side = ML::Clamp(_Values[C_LaunchFieldSide], 0, 9);
+    declare Dir = ML::Clamp(_Values[C_LaunchFieldDir], 0, 7);
+    declare Cooldown = ML::Clamp(_Values[C_LaunchFieldCooldown], 0, Constants::C_LaunchCooldownMax);
+    declare Ground = _Values[C_LaunchFieldGround] == 1;
+
+    switch (_Key) {
+        case 1: {
+            Meta_Launch1_On = On;
+            Meta_Launch1_Up = Up;
+            Meta_Launch1_Down = Down;
+            Meta_Launch1_Side = Side;
+            Meta_Launch1_Dir = Dir;
+            Meta_Launch1_Cooldown = Cooldown;
+            Meta_Launch1_Ground = Ground;
+        }
+        case 2: {
+            Meta_Launch2_On = On;
+            Meta_Launch2_Up = Up;
+            Meta_Launch2_Down = Down;
+            Meta_Launch2_Side = Side;
+            Meta_Launch2_Dir = Dir;
+            Meta_Launch2_Cooldown = Cooldown;
+            Meta_Launch2_Ground = Ground;
+        }
+        case 3: {
+            Meta_Launch3_On = On;
+            Meta_Launch3_Up = Up;
+            Meta_Launch3_Down = Down;
+            Meta_Launch3_Side = Side;
+            Meta_Launch3_Dir = Dir;
+            Meta_Launch3_Cooldown = Cooldown;
+            Meta_Launch3_Ground = Ground;
+        }
+        case 4: {
+            Meta_Launch4_On = On;
+            Meta_Launch4_Up = Up;
+            Meta_Launch4_Down = Down;
+            Meta_Launch4_Side = Side;
+            Meta_Launch4_Dir = Dir;
+            Meta_Launch4_Cooldown = Cooldown;
+            Meta_Launch4_Ground = Ground;
+        }
+    }
+}
+
+
+Void CopyLaunchMeta(CAnchorData _From, CAnchorData _To)
+{
+    for (Key, 1, Constants::C_LaunchKeyCount) {
+        LaunchMetaWrite(_To, Key, LaunchMetaRead(_From, Key));
+    }
+}
+
+
+// The four launch-ability keys on the checkpoint/spawn dialogs, laid out like the weapon
+// picker: one shared bar with the key numbers as the options, and every granted key sitting on
+// the same blue box the weapon picker uses to mark its selection (several may be lit at once).
+// Baked at open time: the only way to change a key is the sub-window, which reopens this dialog.
+Text LaunchKeyPicker(CAnchorData _Anchor, Text _Position)
+{
+    // Half the width of a Select* bar — single digits need far less room than weapon names.
+    declare Total = 40;
+    declare Count = Constants::C_LaunchKeyCount;
+    declare Width = Total / Count;
+    declare TextTotal = ""^Total;
+    declare TextBar = ""^(Total + 1);
+
+    declare Labels = "";
+    declare Highlights = "";
+    for (Key, 1, Count) {
+        declare CenterX = -Total / 2 + Width / 2 + (Key - 1) * Width;
+        declare TextKey = ""^Key;
+        declare TextCenterX = ""^CenterX;
+        declare TextLeftX = ""^(CenterX - Width / 2);
+        declare TextWidth = ""^Width;
+
+        declare Values = LaunchMetaRead(_Anchor, Key);
+        if (Values[C_LaunchFieldOn] == 1) {
+            Highlights ^= """<quad pos="{{{TextLeftX}}} 1" size="{{{TextWidth}}} 7" bgcolor="4777C1FF"/>""";
+        }
+        Labels ^= """
+            <label id="Launch_Key{{{TextKey}}}" pos="{{{TextCenterX}}} -2" size="{{{TextWidth}}} 6"
+                text="{{{TextKey}}}" halign="center" valign="center" textsize="2" class="text" scriptevents="1"/>
+        """;
+    }
+
+    declare Picker = """
+        <frame pos="0 -3.5">
+            <frame clip="True" clipposn="0 -2.5" clipsizen="{{{TextTotal}}} 5" halign="center">
+                {{{Labels}}}
+                {{{Highlights}}}
+            </frame>
+            <quad pos="0 0.5" size="{{{TextBar}}} 6.1" bgcolor="797979AA" halign="center"/>
+        </frame>
+    """;
+
+    return BigProperty(_Position, "Action Keys", Picker);
 }
 
 
@@ -1023,6 +1379,11 @@ Void SaveGoalSettings()
 
 Void EditCheckpoint(CAnchorData _Checkpoint)
 {
+    // No launch sub-window is open once this dialog is up, so nothing may still flush
+    // launch values (a window closed with the X leaves them pointing at its anchor).
+    G_LaunchEditAnchor = NullId;
+    G_LaunchEditKey = 0;
+
     /// --- Variables
     InitBasePageVariables(_Checkpoint);
 
@@ -1075,9 +1436,11 @@ Void EditCheckpoint(CAnchorData _Checkpoint)
             {{{Property("-15 -7.5", "Refill", Checkbox("10 0", "Checkbox_Fill_Stamina"))}}}
             {{{Property("7.5 -7.5", "Empty", Checkbox("10 0", "Checkbox_Empty_Stamina"))}}}
         </frame>
+
+        {{{LaunchKeyPicker(_Checkpoint, "0 -83")}}}
     """;
 
-    SetWindow(MakeWindow("Edit Checkpoint", Properties));
+    SetWindow(MakeWindowTall("Edit Checkpoint", Properties, True));
 
     ManialinkText = """
     <manialink version="3" name="Obstacle:EditCheckpoint">
@@ -1197,6 +1560,16 @@ Void EditCheckpoint(CAnchorData _Checkpoint)
                             case "Label_Test":
                                 SendCustomEvent("Event_Test_Checkpoint", Text[]);
 
+                            // Launch abilities live in their own window, one per key
+                            case "Launch_Key1":
+                                SendCustomEvent("Event_Edit_Launch", ["1"]);
+                            case "Launch_Key2":
+                                SendCustomEvent("Event_Edit_Launch", ["2"]);
+                            case "Launch_Key3":
+                                SendCustomEvent("Event_Edit_Launch", ["3"]);
+                            case "Launch_Key4":
+                                SendCustomEvent("Event_Edit_Launch", ["4"]);
+
                             case "OrderPlus":
                                 Order = Order + 1;
                             case "OrderMinus":
@@ -1310,6 +1683,11 @@ Void SaveCheckpointSettings()
 
 Void EditSpawn(CAnchorData _Spawn)
 {
+    // No launch sub-window is open once this dialog is up, so nothing may still flush
+    // launch values (a window closed with the X leaves them pointing at its anchor).
+    G_LaunchEditAnchor = NullId;
+    G_LaunchEditKey = 0;
+
     /// --- Variables
     InitBasePageVariables(_Spawn);
 
@@ -1338,9 +1716,11 @@ Void EditSpawn(CAnchorData _Spawn)
             {{{Property("-12 5.5", "Gain (0-100%)", Entry("0 -5.5", "Entry_Stamina_Gain"))}}}
             {{{Property("12 5.5", "Amount (10-300)", Entry("0 -5.5", "Entry_Stamina_Amount"))}}}
         </frame>
+
+        {{{LaunchKeyPicker(_Spawn, "0 -83")}}}
     """;
 
-    SetWindow(MakeWindowNoTest("Edit Spawn", Properties));
+    SetWindow(MakeWindowTall("Edit Spawn", Properties, False));
 
     ManialinkText = """
     <manialink version="3" name="Obstacle:EditSpawn">
@@ -1417,6 +1797,16 @@ Void EditSpawn(CAnchorData _Spawn)
                                 SendCustomEvent("Event_Paste_Spawn", Text[]);
                             case "Label_Test":
                                 SendCustomEvent("Event_Test_Spawn", Text[]);
+
+                            // Launch abilities live in their own window, one per key
+                            case "Launch_Key1":
+                                SendCustomEvent("Event_Edit_Launch", ["1"]);
+                            case "Launch_Key2":
+                                SendCustomEvent("Event_Edit_Launch", ["2"]);
+                            case "Launch_Key3":
+                                SendCustomEvent("Event_Edit_Launch", ["3"]);
+                            case "Launch_Key4":
+                                SendCustomEvent("Event_Edit_Launch", ["4"]);
 
                             case "OrderPlus":
                                 Order = Order + 1;
@@ -1498,6 +1888,243 @@ Void SaveSpawnSettings()
 
     SaveBasePageVariables(Anchor);
     SaveWeaponPageVariables(Anchor);
+}
+
+
+/**
+ * Per-key launch ability of one checkpoint or spawn: the same launch a trampoline pad fires,
+ * triggered by the player on key _Key while they are running this anchor's section.
+ */
+Void EditLaunchAbility(CAnchorData _Anchor, Integer _Key)
+{
+    /// --- Variables
+    G_LaunchEditAnchor = _Anchor.Id;
+    G_LaunchEditKey = _Key;
+
+    declare Boolean LaunchOn for ManialinkPage = False;
+    declare Integer LaunchUp for ManialinkPage = 0;
+    declare Integer LaunchDown for ManialinkPage = 0;
+    declare Integer LaunchSide for ManialinkPage = 0;
+    declare Integer LaunchDir for ManialinkPage = 0;
+    declare Integer LaunchCooldown for ManialinkPage = 0;
+    declare Boolean LaunchGround for ManialinkPage = False;
+
+    declare Values = LaunchMetaRead(_Anchor, _Key);
+    LaunchOn = Values[C_LaunchFieldOn] == 1;
+    LaunchUp = Values[C_LaunchFieldUp];
+    LaunchDown = Values[C_LaunchFieldDown];
+    LaunchSide = Values[C_LaunchFieldSide];
+    LaunchDir = Values[C_LaunchFieldDir];
+    LaunchCooldown = Values[C_LaunchFieldCooldown];
+    LaunchGround = Values[C_LaunchFieldGround] == 1;
+
+    /// --- Manialink
+    declare Properties = """
+        <frame id="Basic" pos="0 25">
+            {{{Select2("0 -2.5", "Enable", "Disable", "LaunchOn_Selector")}}}
+            {{{BigProperty("0 -13", "Strength", "")}}}
+            {{{InlineProperty("10 -19.5", "Upward", PlusMinus("7 1.25", "+", "UpPlus") ^ PlusMinus("7 -1.25", "-", "UpMinus") ^ Entry("-1 0", "Entry_LaunchUp"))}}}
+            {{{InlineProperty("10 -27.5", "Downward", PlusMinus("7 1.25", "+", "DownPlus") ^ PlusMinus("7 -1.25", "-", "DownMinus") ^ Entry("-1 0", "Entry_LaunchDown"))}}}
+            {{{InlineProperty("10 -35.5", "Horizontal", PlusMinus("7 1.25", "+", "SidePlus") ^ PlusMinus("7 -1.25", "-", "SideMinus") ^ Entry("-1 0", "Entry_LaunchSide"))}}}
+            {{{BigProperty("0 -46", "Direction", Select8Arrows("0 -4", C_LaunchDirIdPrefix, "Launch_Dir_Selector"))}}}
+            {{{BigProperty("0 -63", "Cooldown", Entry("0 -6", "Entry_LaunchCooldown"))}}}
+            <label pos="13 -69" size="10 4" text="ms" textsize="1" class="text" halign="left" valign="center2"/>
+            <label pos="-3 -77" size="52 5" text="Only when touching ground" textsize="2" class="text" halign="center" valign="center2"/>
+            {{{Checkbox("21 -77", "Checkbox_LaunchGround")}}}
+        </frame>
+    """;
+
+    SetWindow(MakeWindowWithBack("Action Key "^_Key, Properties));
+
+    ManialinkText = """
+    <manialink version="3" name="Obstacle:EditLaunchAbility">
+    {{{GetML()}}}
+    <script><!--
+    #Include "TextLib" as TL
+
+    Integer Clamp0_9(Integer _Value) {
+        if (_Value < 0) {
+            return 0;
+        }
+        if (_Value > 9) {
+            return 9;
+        }
+        return _Value;
+    }
+
+    Integer ClampCooldown(Integer _Value) {
+        if (_Value < 0) {
+            return 0;
+        }
+        if (_Value > {{{TL::ToText(Constants::C_LaunchCooldownMax)}}}) {
+            return {{{TL::ToText(Constants::C_LaunchCooldownMax)}}};
+        }
+        return _Value;
+    }
+
+    Void UpdateView() {
+        declare Boolean LaunchOn for Page;
+        declare Integer LaunchUp for Page;
+        declare Integer LaunchDown for Page;
+        declare Integer LaunchSide for Page;
+        declare Integer LaunchDir for Page;
+        declare Integer LaunchCooldown for Page;
+        declare Boolean LaunchGround for Page;
+
+        declare Entry_LaunchUp <=> (Page.GetFirstChild("Entry_LaunchUp") as CMlEntry);
+        Entry_LaunchUp.SetText(TL::ToText(LaunchUp), False);
+        declare Entry_LaunchDown <=> (Page.GetFirstChild("Entry_LaunchDown") as CMlEntry);
+        Entry_LaunchDown.SetText(TL::ToText(LaunchDown), False);
+        declare Entry_LaunchSide <=> (Page.GetFirstChild("Entry_LaunchSide") as CMlEntry);
+        Entry_LaunchSide.SetText(TL::ToText(LaunchSide), False);
+        declare Entry_LaunchCooldown <=> (Page.GetFirstChild("Entry_LaunchCooldown") as CMlEntry);
+        Entry_LaunchCooldown.SetText(TL::ToText(LaunchCooldown), False);
+
+        // Same Enable / Disable pair the checkpoint window uses for its own Enabled flag
+        declare Quad_LaunchOn_Selector <=> (Page.GetFirstChild("LaunchOn_Selector") as CMlQuad);
+        if (LaunchOn) {
+            Quad_LaunchOn_Selector.RelativePosition_V3.X = -20.;
+        } else {
+            Quad_LaunchOn_Selector.RelativePosition_V3.X = 0.;
+        }
+
+        declare Label_LaunchGround <=> (Page.GetFirstChild("Checkbox_LaunchGround") as CMlLabel);
+        if (LaunchGround && Label_LaunchGround.Value != "✖") {
+            Label_LaunchGround.SetText("✖");
+        }
+        if (!LaunchGround && Label_LaunchGround.Value != "") {
+            Label_LaunchGround.SetText("");
+        }
+
+        declare Quad_Dir_Selector <=> (Page.GetFirstChild("Launch_Dir_Selector") as CMlQuad);
+        Quad_Dir_Selector.RelativePosition_V3.X = -40. + LaunchDir*10.;
+
+        SendCustomEvent("Event_Save_LaunchAbility", Text[]);
+    }
+
+    main() {
+        declare Boolean LaunchOn for Page;
+        declare Integer LaunchUp for Page;
+        declare Integer LaunchDown for Page;
+        declare Integer LaunchSide for Page;
+        declare Integer LaunchDir for Page;
+        declare Integer LaunchCooldown for Page;
+        declare Boolean LaunchGround for Page;
+        declare NeedUpdate = False;
+        UpdateView();
+
+        while (True) {
+            yield;
+
+            if (NeedUpdate) {
+                UpdateView();
+                NeedUpdate = False;
+            }
+
+            foreach (Event in PendingEvents) {
+                switch (Event.Type){
+                    case CMlScriptEvent::Type::MouseClick: {
+                        // Going back must not trigger one more save from this page: the plugin
+                        // flushes the page itself, and by then it no longer points at this key.
+                        declare Leaving = False;
+                        switch (Event.ControlId) {
+                            case "Window_Background":
+                                SendCustomEvent("Event_Property_Window_Clicked", Text[]);
+                            case "Launch_Back": {
+                                SendCustomEvent("Event_Launch_Back", Text[]);
+                                Leaving = True;
+                            }
+                            case "Enable":
+                                LaunchOn = True;
+                            case "Disable":
+                                LaunchOn = False;
+                            case "Checkbox_LaunchGround":
+                                LaunchGround = !LaunchGround;
+                            case "UpPlus":
+                                LaunchUp = Clamp0_9(LaunchUp + 1);
+                            case "UpMinus":
+                                LaunchUp = Clamp0_9(LaunchUp - 1);
+                            case "DownPlus":
+                                LaunchDown = Clamp0_9(LaunchDown + 1);
+                            case "DownMinus":
+                                LaunchDown = Clamp0_9(LaunchDown - 1);
+                            case "SidePlus":
+                                LaunchSide = Clamp0_9(LaunchSide + 1);
+                            case "SideMinus":
+                                LaunchSide = Clamp0_9(LaunchSide - 1);
+                            // Direction arrows, clockwise from "straight ahead" (see Select8Arrows)
+                            case "{{{C_LaunchDirIdPrefix}}}0":
+                                LaunchDir = 0;
+                            case "{{{C_LaunchDirIdPrefix}}}1":
+                                LaunchDir = 1;
+                            case "{{{C_LaunchDirIdPrefix}}}2":
+                                LaunchDir = 2;
+                            case "{{{C_LaunchDirIdPrefix}}}3":
+                                LaunchDir = 3;
+                            case "{{{C_LaunchDirIdPrefix}}}4":
+                                LaunchDir = 4;
+                            case "{{{C_LaunchDirIdPrefix}}}5":
+                                LaunchDir = 5;
+                            case "{{{C_LaunchDirIdPrefix}}}6":
+                                LaunchDir = 6;
+                            case "{{{C_LaunchDirIdPrefix}}}7":
+                                LaunchDir = 7;
+                        }
+
+                        if (!Leaving) {
+                            NeedUpdate = True;
+                        }
+                    }
+                    case CMlScriptEvent::Type::EntrySubmit: {
+                        declare Entry <=> (Event.Control as CMlEntry);
+                        switch(Entry.ControlId) {
+                            case "Entry_LaunchUp":
+                                LaunchUp = Clamp0_9(TL::ToInteger(Entry.Value));
+                            case "Entry_LaunchDown":
+                                LaunchDown = Clamp0_9(TL::ToInteger(Entry.Value));
+                            case "Entry_LaunchSide":
+                                LaunchSide = Clamp0_9(TL::ToInteger(Entry.Value));
+                            case "Entry_LaunchCooldown":
+                                LaunchCooldown = ClampCooldown(TL::ToInteger(Entry.Value));
+                        }
+                        NeedUpdate = True;
+                    }
+                }
+            }
+        }
+    }
+    --></script>
+    </manialink>
+    """;
+}
+
+
+Void SaveLaunchAbilitySettings()
+{
+    // Write to the anchor the open sub-window was opened for, not to whatever anchor the
+    // editor currently considers selected: the page belongs to G_LaunchEditAnchor/Key by
+    // construction, so it can never spill its values onto another anchor, and the save keeps
+    // working if something clears the selection while the window is up.
+    if (G_LaunchEditKey <= 0) {
+        return;
+    }
+    if (!AnchorData.existskey(G_LaunchEditAnchor)) {
+        return;
+    }
+    declare Anchor <=> AnchorData[G_LaunchEditAnchor];
+
+    declare Boolean LaunchOn for ManialinkPage = False;
+    declare Integer LaunchUp for ManialinkPage = 0;
+    declare Integer LaunchDown for ManialinkPage = 0;
+    declare Integer LaunchSide for ManialinkPage = 0;
+    declare Integer LaunchDir for ManialinkPage = 0;
+    declare Integer LaunchCooldown for ManialinkPage = 0;
+    declare Boolean LaunchGround for ManialinkPage = False;
+
+    LaunchMetaWrite(Anchor, G_LaunchEditKey, [
+        LaunchFlag(LaunchOn), LaunchUp, LaunchDown, LaunchSide,
+        LaunchDir, LaunchCooldown, LaunchFlag(LaunchGround)
+    ]);
 }
 
 
@@ -1638,6 +2265,7 @@ Void EditTrampolineItem(CAnchorData _Item)
     declare metadata Meta_TrampolineHoriz for _Item = Constants::C_TrampolineDefaultHoriz;
     declare metadata Meta_TrampolineWaitGround for _Item = Constants::C_TrampolineDefaultWaitGround;
     declare metadata Meta_TrampolineDelay for _Item = Constants::C_TrampolineDefaultDelay;
+    declare metadata Meta_TrampolineCooldown for _Item = Constants::C_TrampolineDefaultCooldown;
 
     declare Integer TrampUp for ManialinkPage = 0;
     declare Integer TrampDown for ManialinkPage = 0;
@@ -1645,29 +2273,36 @@ Void EditTrampolineItem(CAnchorData _Item)
     declare Integer TrampCompass for ManialinkPage = 0;
     declare Boolean TrampWaitGround for ManialinkPage = False;
     declare Integer TrampDelay for ManialinkPage = 0;
+    declare Integer TrampCooldown for ManialinkPage = 0;
     TrampUp = ML::Clamp(Meta_TrampolineUp, 0, 9);
     TrampDown = ML::Clamp(Meta_TrampolineDown, 0, 9);
     TrampHoriz = ML::Clamp(Meta_TrampolineHoriz, 0, 9);
     TrampCompass = ML::Clamp(Meta_TrampolineCompass, 0, 7);
     TrampWaitGround = Meta_TrampolineWaitGround;
     TrampDelay = ML::Clamp(Meta_TrampolineDelay, 0, Constants::C_TrampolineDelayMax);
+    TrampCooldown = ML::Clamp(Meta_TrampolineCooldown, 0, Constants::C_TrampolineCooldownMax);
 
     /// --- Manialink
+    // Same layout as the launch ability page (see EditLaunchAbility), minus its enable row and
+    // with the pad's own delay under the ground option. Direction stays a compass: a pad launches
+    // along the world axes, not relative to where the player looks.
     declare Properties = """
         <frame id="Basic" pos="0 25">
-            {{{BigProperty("0 -2.5", "Strength Up", PlusMinus("7 -4.75", "+", "UpPlus") ^ PlusMinus("7 -7.25", "-", "UpMinus") ^ Entry("-1 -6", "Entry_TrampUp"))}}}
-            <label pos="0 -13" size="78 6" text="In order to be launched up, the player needs to be touching the ground." textsize="1" class="text" halign="center" valign="top" autonewline="1"/>
-            <label pos="-3 -20" size="52 5" text="Wait until touching ground" textsize="2" class="text" halign="center" valign="center2"/>
-            {{{Checkbox("21 -20", "Checkbox_TrampWaitGround")}}}
-            {{{BigProperty("0 -26.5", "Strength Down", PlusMinus("7 -4.75", "+", "DownPlus") ^ PlusMinus("7 -7.25", "-", "DownMinus") ^ Entry("-1 -6", "Entry_TrampDown"))}}}
-            {{{BigProperty("0 -39.5", "Strength Side", PlusMinus("7 -4.75", "+", "HorizPlus") ^ PlusMinus("7 -7.25", "-", "HorizMinus") ^ Entry("-1 -6", "Entry_TrampHoriz"))}}}
-            {{{BigProperty("0 -52.5", "Direction", Select8("0 -6.5", "N", "NE", "E", "SE", "S", "SW", "W", "NW", "Compass_Selector"))}}}
-            {{{BigProperty("0 -65.5", "Delay before Launching", Entry("0 -6.5", "Entry_TrampDelay"))}}}
-            <label pos="13 -72" size="10 4" text="ms" textsize="1" class="text" halign="left" valign="center2"/>
+            {{{BigProperty("0 -3", "Strength", "")}}}
+            {{{InlineProperty("10 -9.5", "Upward", PlusMinus("7 1.25", "+", "UpPlus") ^ PlusMinus("7 -1.25", "-", "UpMinus") ^ Entry("-1 0", "Entry_TrampUp"))}}}
+            {{{InlineProperty("10 -17.5", "Downward", PlusMinus("7 1.25", "+", "DownPlus") ^ PlusMinus("7 -1.25", "-", "DownMinus") ^ Entry("-1 0", "Entry_TrampDown"))}}}
+            {{{InlineProperty("10 -25.5", "Horizontal", PlusMinus("7 1.25", "+", "HorizPlus") ^ PlusMinus("7 -1.25", "-", "HorizMinus") ^ Entry("-1 0", "Entry_TrampHoriz"))}}}
+            {{{BigProperty("0 -36", "Direction", Select8("0 -4", "N", "NE", "E", "SE", "S", "SW", "W", "NW", "Compass_Selector"))}}}
+            {{{BigProperty("0 -53", "Cooldown", Entry("0 -6", "Entry_TrampCooldown"))}}}
+            <label pos="13 -59" size="10 4" text="ms" textsize="1" class="text" halign="left" valign="center2"/>
+            <label pos="-3 -67" size="52 5" text="Only when touching ground" textsize="2" class="text" halign="center" valign="center2"/>
+            {{{Checkbox("21 -67", "Checkbox_TrampWaitGround")}}}
+            {{{BigProperty("0 -77", "Delay", Entry("0 -6", "Entry_TrampDelay"))}}}
+            <label pos="13 -83" size="10 4" text="ms" textsize="1" class="text" halign="left" valign="center2"/>
         </frame>
     """;
 
-    SetWindow(MakeWindowWithoutEnabled("Edit Trampoline Item", Properties));
+    SetWindow(MakeWindowWithoutEnabled("Edit Trampoline", Properties));
 
     ManialinkText = """
     <manialink version="3" name="Obstacle:EditTrampolineItem">
@@ -1695,6 +2330,16 @@ Void EditTrampolineItem(CAnchorData _Item)
         return _Value;
     }
 
+    Integer ClampCooldown(Integer _Value) {
+        if (_Value < 0) {
+            return 0;
+        }
+        if (_Value > {{{TL::ToText(Constants::C_TrampolineCooldownMax)}}}) {
+            return {{{TL::ToText(Constants::C_TrampolineCooldownMax)}}};
+        }
+        return _Value;
+    }
+
     Void UpdateView() {
         declare Integer TrampUp for Page;
         declare Integer TrampDown for Page;
@@ -1702,6 +2347,7 @@ Void EditTrampolineItem(CAnchorData _Item)
         declare Integer TrampCompass for Page;
         declare Boolean TrampWaitGround for Page;
         declare Integer TrampDelay for Page;
+        declare Integer TrampCooldown for Page;
 
         declare Entry_TrampUp <=> (Page.GetFirstChild("Entry_TrampUp") as CMlEntry);
         Entry_TrampUp.SetText(TL::ToText(TrampUp), False);
@@ -1711,6 +2357,8 @@ Void EditTrampolineItem(CAnchorData _Item)
         Entry_TrampHoriz.SetText(TL::ToText(TrampHoriz), False);
         declare Entry_TrampDelay <=> (Page.GetFirstChild("Entry_TrampDelay") as CMlEntry);
         Entry_TrampDelay.SetText(TL::ToText(TrampDelay), False);
+        declare Entry_TrampCooldown <=> (Page.GetFirstChild("Entry_TrampCooldown") as CMlEntry);
+        Entry_TrampCooldown.SetText(TL::ToText(TrampCooldown), False);
 
         declare Label_WaitGround <=> (Page.GetFirstChild("Checkbox_TrampWaitGround") as CMlLabel);
         if (TrampWaitGround && Label_WaitGround.Value != "✖") {
@@ -1733,6 +2381,12 @@ Void EditTrampolineItem(CAnchorData _Item)
         declare Integer TrampCompass for Page;
         declare Boolean TrampWaitGround for Page;
         declare Integer TrampDelay for Page;
+        declare Integer TrampCooldown for Page;
+        // Prefill bookkeeping: TrampDelayPrefilled stays True only while the delay still holds
+        // the value the "wait until touching ground" tick wrote, so unticking can put back
+        // TrampDelayBeforePrefill without ever discarding a delay the mapper typed themselves.
+        declare Boolean TrampDelayPrefilled for Page;
+        declare Integer TrampDelayBeforePrefill for Page;
         declare NeedUpdate = False;
         UpdateView();
 
@@ -1808,8 +2462,22 @@ Void EditTrampolineItem(CAnchorData _Item)
                             }
                             case "Checkbox_TrampWaitGround": {
                                 TrampWaitGround = !TrampWaitGround;
-                                if (TrampWaitGround && TrampDelay == 0) {
-                                    TrampDelay = 5;
+                                if (TrampWaitGround) {
+                                    // A wait-ground pad needs a small delay to fire after the
+                                    // landing, so prefill one -- but never shorten a delay that is
+                                    // already at least as long as the prefill.
+                                    if (TrampDelay < {{{TL::ToText(Constants::C_TrampolineWaitGroundDelayPrefill)}}}) {
+                                        TrampDelayBeforePrefill = TrampDelay;
+                                        TrampDelay = {{{TL::ToText(Constants::C_TrampolineWaitGroundDelayPrefill)}}};
+                                        TrampDelayPrefilled = True;
+                                    }
+                                } else {
+                                    // Untick undoes our own prefill only; a delay edited since the
+                                    // tick has cleared the flag and is kept as-is.
+                                    if (TrampDelayPrefilled) {
+                                        TrampDelay = TrampDelayBeforePrefill;
+                                        TrampDelayPrefilled = False;
+                                    }
                                 }
                                 NeedUpdate = True;
                             }
@@ -1827,8 +2495,16 @@ Void EditTrampolineItem(CAnchorData _Item)
                             case "Entry_TrampHoriz": {
                                 TrampHoriz = Clamp0_9(TL::ToInteger(Entry.Value));
                             }
+                            case "Entry_TrampCooldown": {
+                                TrampCooldown = ClampCooldown(TL::ToInteger(Entry.Value));
+                            }
                             case "Entry_TrampDelay": {
                                 TrampDelay = ClampDelay(TL::ToInteger(Entry.Value));
+                                // The mapper owns the delay from here on: unticking must not
+                                // revert it. Retyping the prefilled value itself is not an edit.
+                                if (TrampDelay != {{{TL::ToText(Constants::C_TrampolineWaitGroundDelayPrefill)}}}) {
+                                    TrampDelayPrefilled = False;
+                                }
                             }
                         }
                         NeedUpdate = True;
@@ -1849,7 +2525,8 @@ Void SaveTrampolineItemSettings()
     }
 
     declare Anchor <=> AnchorData[G_LastAnchorId];
-    if (Anchor.Tag != "Trampoline") {
+    // Accept every trampoline size family (DefaultTag = item model name containing "Trampoline").
+    if (!TL::Find("Trampoline", Anchor.DefaultTag, False, True)) {
         return;
     }
 
@@ -1859,6 +2536,7 @@ Void SaveTrampolineItemSettings()
     declare Integer TrampCompass for ManialinkPage = 0;
     declare Boolean TrampWaitGround for ManialinkPage = False;
     declare Integer TrampDelay for ManialinkPage = 0;
+    declare Integer TrampCooldown for ManialinkPage = 0;
 
     declare metadata Meta_TrampolineUp for Anchor = Constants::C_TrampolineDefaultUp;
     declare metadata Meta_TrampolineDown for Anchor = Constants::C_TrampolineDefaultDown;
@@ -1866,12 +2544,14 @@ Void SaveTrampolineItemSettings()
     declare metadata Meta_TrampolineHoriz for Anchor = Constants::C_TrampolineDefaultHoriz;
     declare metadata Meta_TrampolineWaitGround for Anchor = Constants::C_TrampolineDefaultWaitGround;
     declare metadata Meta_TrampolineDelay for Anchor = Constants::C_TrampolineDefaultDelay;
+    declare metadata Meta_TrampolineCooldown for Anchor = Constants::C_TrampolineDefaultCooldown;
     Meta_TrampolineUp = ML::Clamp(TrampUp, 0, 9);
     Meta_TrampolineDown = ML::Clamp(TrampDown, 0, 9);
     Meta_TrampolineCompass = ML::Clamp(TrampCompass, 0, 7);
     Meta_TrampolineHoriz = ML::Clamp(TrampHoriz, 0, 9);
     Meta_TrampolineWaitGround = TrampWaitGround;
     Meta_TrampolineDelay = ML::Clamp(TrampDelay, 0, Constants::C_TrampolineDelayMax);
+    Meta_TrampolineCooldown = ML::Clamp(TrampCooldown, 0, Constants::C_TrampolineCooldownMax);
 }
 
 ///////////////////////////////////////////////////////////////abc
@@ -2248,7 +2928,12 @@ Void PasteCheckpoint(Ident _AnchorId)
     EmptyStamina = Meta_EmptyStamina;
 
     CopyWeapon(_AnchorId);
-    
+
+    if (AnchorData.existskey(G_LastAnchorId)) {
+        declare Target <=> AnchorData[G_LastAnchorId];
+        CopyLaunchMeta(Anchor, Target);
+    }
+
     SaveCheckpointSettings();
 }
 
@@ -2262,7 +2947,12 @@ Void PasteSpawn(Ident _AnchorId)
     IsCpSpawn = Meta_IsCpSpawn;
 
     CopyWeapon(_AnchorId);
-    
+
+    if (AnchorData.existskey(G_LastAnchorId)) {
+        declare Target <=> AnchorData[G_LastAnchorId];
+        CopyLaunchMeta(Anchor, Target);
+    }
+
     SaveSpawnSettings();
 }
 
@@ -2488,6 +3178,13 @@ Void Loop()
 								}
 								////////////////////
 
+                // Trampoline launch-pads: DefaultTag equals the item's model name -- "Trampoline"
+                // for the original pad and "<size> Trampoline[ Small]" for the Trampolines\\Normal|Small
+                // families -- so every size is caught by the shared "Trampoline" substring.
+                if (TL::Find("Trampoline", Anchor.DefaultTag, False, True)) {
+                    EditTrampolineItem(Anchor);
+                }
+
                 switch (Anchor.DefaultTag)
                 {
                     case "Goal": {
@@ -2510,8 +3207,6 @@ Void Loop()
                         EditAmmoItem(Anchor);
                     case "OffzoneShield":
                         EditOffzoneShieldItem(Anchor);
-                    case "Trampoline":
-                        EditTrampolineItem(Anchor);
                     default :
                         continue;
                 }
@@ -2632,6 +3327,30 @@ Void Loop()
                     }
                     case "Event_Save_TrampolineItem": {
                         SaveTrampolineItemSettings();
+                    }
+                    case "Event_Save_LaunchAbility": {
+                        SaveLaunchAbilitySettings();
+                    }
+                    case "Event_Edit_Launch": {
+                        // Flush whatever key is on screen before repointing the page at another
+                        SaveLaunchAbilitySettings();
+                        if (AnchorData.existskey(G_LastAnchorId)) {
+                            declare LaunchAnchor <=> AnchorData[G_LastAnchorId];
+                            EditLaunchAbility(LaunchAnchor, ML::Clamp(TL::ToInteger(Event.CustomEventData[0]), 1, Constants::C_LaunchKeyCount));
+                        }
+                    }
+                    case "Event_Launch_Back": {
+                        SaveLaunchAbilitySettings();
+                        G_LaunchEditAnchor = NullId;
+                        G_LaunchEditKey = 0;
+                        if (AnchorData.existskey(G_LastAnchorId)) {
+                            declare BackAnchor <=> AnchorData[G_LastAnchorId];
+                            if (BackAnchor.DefaultTag == "Spawn") {
+                                EditSpawn(BackAnchor);
+                            } else {
+                                EditCheckpoint(BackAnchor);
+                            }
+                        }
                     }
 										case "Event_Save_ItemProperties": {
 												SaveItemProperties();

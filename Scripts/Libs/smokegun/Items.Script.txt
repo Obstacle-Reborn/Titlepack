@@ -26,8 +26,10 @@ declare CSmObject[] G_AnchorsObjects;
 Void LoadItems() {
     G_ItemIdents[Constants::C_ItemOffzone] = ItemList_Add(Constants::C_ItemOffzone);
     G_ItemIdents[Constants::C_ItemAmmo] = ItemList_Add(Constants::C_ItemAmmo);
-    G_ItemIdents[Constants::C_ItemTrampoline] = ItemList_Add(Constants::C_ItemTrampoline);
-    
+    foreach (TrampolineItem in Constants::C_TrampolineItems) {
+        G_ItemIdents[TrampolineItem] = ItemList_Add(TrampolineItem);
+    }
+
     foreach (Item in Constants::C_CustomItems) {
         G_ItemIdents[Item] = ItemList_Add(Item);
     }
@@ -77,30 +79,35 @@ Void Place() {
                     Amount = Meta_GrantAmmoAmount;
             }
 
-            case Constants::C_ItemTrampoline: {
-                    // Launch parameters, set per anchor by the mapper (ObstacleTitleArena
-                    // trampoline dialog). Clamped here because the metadata may come from
-                    // legacy or hand-edited maps. Legacy Meta_TrampolineDir is ignored.
-                    declare metadata Meta_TrampolineUp for AnchorLandmark = Constants::C_TrampolineDefaultUp;
-                    declare metadata Meta_TrampolineDown for AnchorLandmark = Constants::C_TrampolineDefaultDown;
-                    declare metadata Meta_TrampolineCompass for AnchorLandmark = Constants::C_TrampolineDefaultCompass;
-                    declare metadata Meta_TrampolineHoriz for AnchorLandmark = Constants::C_TrampolineDefaultHoriz;
-                    declare metadata Meta_TrampolineWaitGround for AnchorLandmark = Constants::C_TrampolineDefaultWaitGround;
-                    declare metadata Meta_TrampolineDelay for AnchorLandmark = Constants::C_TrampolineDefaultDelay;
-                    declare Integer TrampolineUp for Object = Constants::C_TrampolineDefaultUp;
-                    declare Integer TrampolineDown for Object = Constants::C_TrampolineDefaultDown;
-                    declare Integer TrampolineCompass for Object = Constants::C_TrampolineDefaultCompass;
-                    declare Integer TrampolineHoriz for Object = Constants::C_TrampolineDefaultHoriz;
-                    declare Boolean TrampolineWaitGround for Object = Constants::C_TrampolineDefaultWaitGround;
-                    declare Integer TrampolineDelay for Object = Constants::C_TrampolineDefaultDelay;
-                    TrampolineUp = ML::Clamp(Meta_TrampolineUp, 0, 9);
-                    TrampolineDown = ML::Clamp(Meta_TrampolineDown, 0, 9);
-                    TrampolineCompass = ML::Clamp(Meta_TrampolineCompass, 0, 7);
-                    TrampolineHoriz = ML::Clamp(Meta_TrampolineHoriz, 0, 9);
-                    TrampolineWaitGround = Meta_TrampolineWaitGround;
-                    TrampolineDelay = ML::Clamp(Meta_TrampolineDelay, 0, Constants::C_TrampolineDelayMax);
-            }
+        }
 
+        // Any trampoline launch-pad (original Obstacle\\Trampoline.Item.gbx plus every
+        // size in the Trampolines\\Normal|Small families) is recognised by the
+        // "Trampoline" substring in its item path, so they all share the mapper-set launch
+        // metadata. Clamped here because the metadata may come from legacy or hand-edited
+        // maps. Legacy Meta_TrampolineDir is ignored.
+        if (TL::Find("Trampoline", ObjectName, False, True)) {
+            declare metadata Meta_TrampolineUp for AnchorLandmark = Constants::C_TrampolineDefaultUp;
+            declare metadata Meta_TrampolineDown for AnchorLandmark = Constants::C_TrampolineDefaultDown;
+            declare metadata Meta_TrampolineCompass for AnchorLandmark = Constants::C_TrampolineDefaultCompass;
+            declare metadata Meta_TrampolineHoriz for AnchorLandmark = Constants::C_TrampolineDefaultHoriz;
+            declare metadata Meta_TrampolineWaitGround for AnchorLandmark = Constants::C_TrampolineDefaultWaitGround;
+            declare metadata Meta_TrampolineDelay for AnchorLandmark = Constants::C_TrampolineDefaultDelay;
+            declare metadata Meta_TrampolineCooldown for AnchorLandmark = Constants::C_TrampolineDefaultCooldown;
+            declare Integer TrampolineUp for Object = Constants::C_TrampolineDefaultUp;
+            declare Integer TrampolineDown for Object = Constants::C_TrampolineDefaultDown;
+            declare Integer TrampolineCompass for Object = Constants::C_TrampolineDefaultCompass;
+            declare Integer TrampolineHoriz for Object = Constants::C_TrampolineDefaultHoriz;
+            declare Boolean TrampolineWaitGround for Object = Constants::C_TrampolineDefaultWaitGround;
+            declare Integer TrampolineDelay for Object = Constants::C_TrampolineDefaultDelay;
+            declare Integer TrampolineCooldown for Object = Constants::C_TrampolineDefaultCooldown;
+            TrampolineUp = ML::Clamp(Meta_TrampolineUp, 0, 9);
+            TrampolineDown = ML::Clamp(Meta_TrampolineDown, 0, 9);
+            TrampolineCompass = ML::Clamp(Meta_TrampolineCompass, 0, 7);
+            TrampolineHoriz = ML::Clamp(Meta_TrampolineHoriz, 0, 9);
+            TrampolineWaitGround = Meta_TrampolineWaitGround;
+            TrampolineDelay = ML::Clamp(Meta_TrampolineDelay, 0, Constants::C_TrampolineDelayMax);
+            TrampolineCooldown = ML::Clamp(Meta_TrampolineCooldown, 0, Constants::C_TrampolineCooldownMax);
         }
     }
 }

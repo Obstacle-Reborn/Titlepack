@@ -4,7 +4,6 @@
 #Const Version           "2.8"
 #Const ScriptName        "Modes/ShootMania/Obstacle.Script.txt"
 
-
 // ---------------------------------- //
 // Libraries
 // ---------------------------------- //
@@ -106,6 +105,7 @@ declare Ident   G_ObstacleModelId;
 declare Boolean G_ForceInvisibleSkin;
 declare Ident   G_WayPointSpawn;
 declare Ident   G_TrampolineActionId;
+declare Ident[] G_LaunchActionIds;	// one per launch key, index 0 = key 1 (see C_LaunchActionModels)
 declare Integer G_TrampolinePvPWindowEnd;
 declare Boolean G_TrampolinePvPRestore;
 declare Integer G_TrampolinePvPInFlight;	// launches armed but not yet confirmed fired; the window only collapses when this hits 0
@@ -238,6 +238,11 @@ G_TrampolinePvPRestore = False;
 G_TrampolinePvPInFlight = 0;
 ActionList_Begin();
 G_TrampolineActionId = ActionList_Add("Trampoline.Action.Gbx");
+// One model per launch key, so a press echo identifies its key through Event.ActionId
+G_LaunchActionIds = [];
+foreach (ModelName in Constants::C_LaunchActionModels) {
+	G_LaunchActionIds.add(ActionList_Add(ModelName));
+}
 ActionList_End();
 ***
 
@@ -544,22 +549,59 @@ foreach (Event in PendingEvents) {
             if (Event.Param1 == "trampoline") {
                 declare Payload = "?";
                 if (Event.Param2.count > 0) Payload = Event.Param2[0];
-                if (Payload != "hb") {
+                if (Payload == "press") {
+                    // A bound key slot reporting its own activation. The event's own slot fields
+                    // are useless here (ShooterActionSlot is always Slot_A, ShooterActionId is
+                    // empty) and the OnActionEvent that carries a key is only delivered for inputs
+                    // with no action bound — so before the per-key models existed, nothing could
+                    // tell two granted keys apart and both fell through to the single-granted-key
+                    // rescue, which is why granting a second key killed both.
+                    //
+                    // Event.ActionId names the model that sent the echo, and each key slot runs
+                    // its own copy, so the key is now in the event itself.
+                    switchtype (Event.ShooterEntity) {
+                        case CSmPlayer: {
+                            declare Presser = (Event.ShooterEntity as CSmPlayer);
+                            declare ModelKey = LaunchKeyFromActionId(Event.ActionId);
+                            // An echo from any other model is ignored: only the key slots are ever
+                            // bound, so only they can send a press. Guessing a key here (the old
+                            // "the section grants exactly one key" rescue) is what broke as soon
+                            // as a section granted two.
+                            if (ModelKey > 0) {
+                                TryLaunchOnKey(Presser, ModelKey);
+                            }
+                        }
+                        default: { DoNothing(); }
+                    }
+                }
+                else if (Payload != "hb") {
                     switchtype (Event.ShooterEntity) {
                         case CSmPlayer: {
                             declare Shooter = (Event.ShooterEntity as CSmPlayer);
-                            declare EchoedVariant = TL::ToInteger(Payload);
+                            // Low 16 bits only: an action instance carrying an energy gauge
+                            // reads its Variant back as EnergyMax*65536 + what was armed, and
+                            // an older Gbx echoes that raw value. Masking here keeps the mode
+                            // working with either build.
+                            declare EchoedVariant = TL::ToInteger(Payload) % 65536;
+                            // Either encoding base: pads launch on the world-compass base, keys on
+                            // the aim-relative one, and both must disarm their slot on the echo.
                             if (EchoedVariant >= Constants::C_TrampolineVariantBase
-                                && EchoedVariant <= Constants::C_TrampolineVariantBase + 9979) {
+                                && EchoedVariant <= Constants::C_TrampolineVariantBaseRelative + Constants::C_TrampolineVariantPackedMax) {
                                 // Normal launch: disarm so the action can fire again next touch
-                                ActionSetVariant(Shooter, CSmMode::EActionSlot::Slot_D, 0);
+                                // or key press (pad slot and key slots share this bookkeeping)
+                                DisarmLaunch(Shooter);
                             } else {
-                                // Garbage echo (0x27100000): the engine re-initialized the action
-                                // (respawn, checkpoint weapon set, ...) and corrupted the slot
-                                // variant; writes no longer reach the instance. Replace it with a
-                                // fresh one — the corrupt instance fires exactly once, so this
-                                // self-heals every corruption trigger, known or not.
-                                LoadTrampolineAction(Shooter);
+                                // An echo that is not a launch encoding: the action fired on a
+                                // value the mode never wrote. A Gbx built before the Variant
+                                // masking does exactly this — a disarmed instance reads its own
+                                // EnergyMax*65536, which is not 0, so it "fires" once on it.
+                                //
+                                // Ignore it. Reloading the slot here produced an endless
+                                // reload -> fresh instance -> stray echo -> reload storm in-game
+                                // (a permanent "fired 419430400" flood that also wiped every
+                                // armed launch before it could fire), while the stray echo on its
+                                // own is harmless: the instance goes quiet after that one shot.
+                                DoNothing();
                             }
                             // This armed launch has resolved (fired, or corrupt and replaced): retire it
                             // from the in-flight count. Once nothing else is still waiting to fire, collapse
@@ -599,7 +641,7 @@ foreach (Event in PendingEvents) {
 						// Trampoline item: arm the trampoline action to launch the toucher
 						if (Event.Object != Null && Event.Player != Null) {
 							declare Text ItemName for Event.Object = "";
-							if (ItemName == Constants::C_ItemTrampoline) {
+							if (TL::Find("Trampoline", ItemName, False, True)) {
 								// Arming guard: the OnPlayerTouchesObject event fires across the whole TriggerShape,
 									// but arming must reach every point in it (a 6x6 pad corner is ~4.24m from the anchor).
 									// Kept below a respawn distance so it still drops stale touches queued across a respawn.
@@ -629,11 +671,12 @@ foreach (Event in PendingEvents) {
 										LaunchGatesOpen = False;
 									}
 
-									// per-object cooldown so standing on the pad doesn't refire every tick
-									declare Integer[Ident] TrampolineCooldowns for Event.Player = [];
-									if (LaunchGatesOpen && (!TrampolineCooldowns.existskey(Event.Object.Id) || Now > TrampolineCooldowns[Event.Object.Id])) {
-										TrampolineCooldowns[Event.Object.Id] = Now + 500;
-
+									// Pad-wide cooldown: the pad that fires stamps the player, and no trampoline
+									// launches them again until it passes -- which is also what keeps a pad from
+									// refiring every tick while they stand on it. Only an actual launch stamps it,
+									// so a pad left at strength 0 never silences the ones around it.
+									declare Integer TrampolineCooldownEnd for Event.Player = 0;
+									if (LaunchGatesOpen && Now > TrampolineCooldownEnd) {
 										// Launch parameters from the anchor metadata (copied onto the
 										// object, clamped, in Items::Place)
 										declare Integer TrampolineUp for Event.Object = Constants::C_TrampolineDefaultUp;
@@ -648,29 +691,16 @@ foreach (Event in PendingEvents) {
 										}
 
 										if (TrampolineUp > 0 || LaunchDown > 0 || TrampolineHoriz > 0) {
-											// Open a short PvP window so the blast can push the player.
-											// G_LastUsePvPWeapons is set too, so the "used PvP weapons" run-stamp
-											// stays suppressed (a mode-sanctioned launch is not player PvP).
-											if (G_TrampolinePvPWindowEnd <= 0) {
-												G_TrampolinePvPRestore = UsePvPWeapons;
-											}
-											// Open at the safety cap; the fire echo collapses it to a short tail once the blast lands.
-											G_TrampolinePvPWindowEnd = Now + Constants::C_TrampolinePvPMaxMs;
-											G_TrampolinePvPInFlight += 1;
-											UsePvPWeapons = True;
-											G_LastUsePvPWeapons = True;
-
 											// Compass calibration: editor space (N..NW clockwise) -> action space
-											declare Steps = TrampolineCompass;
-											if (Constants::C_TrampolineCompassMirror) {
-												Steps = (8 - TrampolineCompass) % 8;
-											}
-											declare ActionCompass = (Steps + Constants::C_TrampolineCompassOffset) % 8;
+											declare ActionCompass = LaunchActionCompass(TrampolineCompass);
 
 											// Encoding v2 (must match the action): base + up*1000 + down*100 + compass*10 + horiz
 											declare TrampolineVariant = Constants::C_TrampolineVariantBase
 												+ TrampolineUp * 1000 + LaunchDown * 100 + ActionCompass * 10 + TrampolineHoriz;
-											ActionSetVariant(Event.Player, CSmMode::EActionSlot::Slot_D, TrampolineVariant);
+											declare Integer TrampolineCooldown for Event.Object = Constants::C_TrampolineDefaultCooldown;
+											TrampolineCooldownEnd = Now + TrampolineCooldown;
+											// Slot index 0 = the pad slot; opens the PvP window and arms the action
+											ArmLaunch(Event.Player, 0, TrampolineVariant);
 										}
 									}
 								}
@@ -713,6 +743,11 @@ foreach (Event in PendingEvents) {
             PendingCaptures.add(Event);
         }
 
+        // No OnActionEvent case: the engine delivers it only for inputs that NO action is bound
+        // to (verified in-game — pressing a granted, bound key produces the action's own press
+        // echo and no OnActionEvent, pressing an ungranted key produces the reverse). So it can
+        // never report a launch key that is actually usable, and using it to launch would fire on
+        // keys the section hasn't granted. The press echo's Event.ActionId is the identity source.
         default: {
             Events::Valid(Event);
         }
@@ -790,6 +825,7 @@ foreach (Player in AllPlayers) {
             if (!Player::isInitialized(Player)) {
                 Obstacle::NewPlayer(Player);
                 LoadTrampolineAction(Player);
+                LoadLaunchActions(Player);
             } else if (!Player::hasTabsInitialized(Player)) {
                 declare CUIConfig UI <=> UIManager.GetUI(Player);
                 Tabs::UseTabs(UI, "ScoresTable");
@@ -836,9 +872,24 @@ foreach (Player in Players) {
             // it. Reload a fresh instance on every spawn — StartTime changes per
             // spawn, so this catches all spawn paths (RS, portals, waypoint jumps).
             declare Integer TrampolineSpawnStart for Player = -1;
+            declare Ident LaunchSection for Player = NullId;
+            declare Boolean LaunchNeedsRefresh for Player = True;
             if (Player.StartTime != TrampolineSpawnStart) {
                 TrampolineSpawnStart = Player.StartTime;
-                LoadTrampolineAction(Player);
+                // Replaces the pad slot and forgets the bindings the spawn destroyed;
+                // the section refresh just below rebinds what this section grants.
+                LoadLaunchActions(Player);
+                LaunchNeedsRefresh = True;
+            }
+
+            // Launch abilities are granted per section: re-read them whenever the governing
+            // landmark changes (checkpoint captured, cp jump, portal, restart) and after a
+            // spawn, whose fresh action instances start out unbound.
+            if (LaunchNeedsRefresh || LaunchSection != Player::GetSectionAnchor(Player)) {
+                LaunchNeedsRefresh = False;
+                LaunchSection = Player::GetSectionAnchor(Player);
+                LoadLaunchConfig(Player);
+                ApplyLaunchBinds(Player);
             }
 
             if (UsePvPWeapons != G_LastUsePvPWeapons) {
@@ -971,6 +1022,296 @@ Void LoadTrampolineAction(CSmPlayer _Player) {
     // Clear the slot variant so the fresh instance can't fire on a stale or
     // garbage value (armed-at-death leftovers, post-respawn corruption)
     ActionSetVariant(_Player, CSmMode::EActionSlot::Slot_D, 0);
+}
+
+// ---------------------------------- //
+// Launch abilities: the trampoline launch, triggered by the player on keys 1..4 instead of
+// by a pad. A checkpoint (or the start spawn) grants and configures them for its section.
+//
+// Keys 1..4 (Activable1..4) live in Slot_E..Slot_H and run the same action model the pads
+// use in Slot_D. A slot is loaded inert (variant 0) and only *bound* while the player's
+// current section grants that key, so the HUD shows exactly the abilities they have.
+// Pressing a bound key makes the mode write a launch variant into that slot — the same
+// arming a pad touch does, PvP window included — and the fire echo disarms it again.
+// Slot index used below: 0 = the pad slot, 1..4 = key 1..4.
+// ---------------------------------- //
+CSmMode::EActionSlot LaunchSlot(Integer _SlotIndex) {
+    switch (_SlotIndex) {
+        case 1: return CSmMode::EActionSlot::Slot_E;
+        case 2: return CSmMode::EActionSlot::Slot_F;
+        case 3: return CSmMode::EActionSlot::Slot_G;
+        case 4: return CSmMode::EActionSlot::Slot_H;
+    }
+    return CSmMode::EActionSlot::Slot_D;
+}
+
+CSmMode::EActionInput LaunchInput(Integer _Key) {
+    switch (_Key) {
+        case 2: return CSmMode::EActionInput::Activable2;
+        case 3: return CSmMode::EActionInput::Activable3;
+        case 4: return CSmMode::EActionInput::Activable4;
+    }
+    return CSmMode::EActionInput::Activable1;
+}
+
+// The key that a press echo came from, read off the *model* that sent it. Each key slot is
+// loaded with its own copy of the trampoline action (C_LaunchActionModels), and every action
+// event names its model in Event.ActionId — the one piece of identity a bound action's echo does
+// carry (verified in-game: ActionId "Trampoline.Action.Gbx" while ShooterActionId was empty and
+// ShooterActionSlot was Slot_A). 0 = not one of the key models (e.g. the pad slot's fire echo).
+Integer LaunchKeyFromActionId(Text _ActionId) {
+    if (_ActionId == "") { return 0; }
+    declare Key = 0;
+    foreach (ModelName in Constants::C_LaunchActionModels) {
+        Key += 1;
+        if (ModelName == _ActionId) {
+            return Key;
+        }
+    }
+    return 0;
+}
+
+// Editor compass (N..NW clockwise) -> action compass index (45 deg steps, +Z toward +X)
+Integer LaunchActionCompass(Integer _EditorCompass) {
+    declare Steps = _EditorCompass;
+    if (Constants::C_TrampolineCompassMirror) {
+        Steps = (8 - _EditorCompass) % 8;
+    }
+    return (Steps + Constants::C_TrampolineCompassOffset) % 8;
+}
+
+// Editor launch direction (Forward..Forward-Left clockwise) -> the 45 deg steps the action
+// turns the owner's aim by, in the action's own rotation sense. C_TrampolineCompassOffset is
+// deliberately not applied here: it calibrates where the editor's "N" sits in the world, while
+// step 0 must simply mean "straight ahead" wherever the player is looking.
+Integer LaunchRelativeSteps(Integer _EditorDir) {
+    if (Constants::C_LaunchRelativeMirror) {
+        return (8 - _EditorDir) % 8;
+    }
+    return _EditorDir % 8;
+}
+
+// Read the launch settings off the landmark governing the player's current section — the
+// last checkpoint they captured, or the spawn before the first one. No landmark (spectator,
+// pre-spawn, legacy map without the metadata) leaves every key ungranted.
+Void LoadLaunchConfig(CSmPlayer _Player) {
+    declare Boolean[] LaunchOn for _Player = [];
+    declare Integer[] LaunchUp for _Player = [];
+    declare Integer[] LaunchDown for _Player = [];
+    declare Integer[] LaunchSide for _Player = [];
+    declare Integer[] LaunchDir for _Player = [];
+    declare Integer[] LaunchCooldown for _Player = [];
+    declare Boolean[] LaunchGround for _Player = [];
+    declare Integer[] LaunchReadyAt for _Player = [];
+
+    LaunchOn = [False, False, False, False];
+    LaunchUp = [0, 0, 0, 0];
+    LaunchDown = [0, 0, 0, 0];
+    LaunchSide = [0, 0, 0, 0];
+    LaunchDir = [0, 0, 0, 0];
+    LaunchCooldown = [0, 0, 0, 0];
+    LaunchGround = [False, False, False, False];
+    LaunchReadyAt = [0, 0, 0, 0];
+
+    declare Section = Player::GetSectionAnchor(_Player);
+    if (!MapLandmarks.existskey(Section)) {
+        return;
+    }
+    declare Anchor <=> MapLandmarks[Section];
+
+    declare metadata Meta_Launch1_On for Anchor = Constants::C_LaunchDefaultOn;
+    declare metadata Meta_Launch1_Up for Anchor = Constants::C_LaunchDefaultUp;
+    declare metadata Meta_Launch1_Down for Anchor = Constants::C_LaunchDefaultDown;
+    declare metadata Meta_Launch1_Side for Anchor = Constants::C_LaunchDefaultSide;
+    declare metadata Meta_Launch1_Dir for Anchor = Constants::C_LaunchDefaultDir;
+    declare metadata Meta_Launch1_Cooldown for Anchor = Constants::C_LaunchDefaultCooldown;
+    declare metadata Meta_Launch1_Ground for Anchor = Constants::C_LaunchDefaultGround;
+
+    declare metadata Meta_Launch2_On for Anchor = Constants::C_LaunchDefaultOn;
+    declare metadata Meta_Launch2_Up for Anchor = Constants::C_LaunchDefaultUp;
+    declare metadata Meta_Launch2_Down for Anchor = Constants::C_LaunchDefaultDown;
+    declare metadata Meta_Launch2_Side for Anchor = Constants::C_LaunchDefaultSide;
+    declare metadata Meta_Launch2_Dir for Anchor = Constants::C_LaunchDefaultDir;
+    declare metadata Meta_Launch2_Cooldown for Anchor = Constants::C_LaunchDefaultCooldown;
+    declare metadata Meta_Launch2_Ground for Anchor = Constants::C_LaunchDefaultGround;
+
+    declare metadata Meta_Launch3_On for Anchor = Constants::C_LaunchDefaultOn;
+    declare metadata Meta_Launch3_Up for Anchor = Constants::C_LaunchDefaultUp;
+    declare metadata Meta_Launch3_Down for Anchor = Constants::C_LaunchDefaultDown;
+    declare metadata Meta_Launch3_Side for Anchor = Constants::C_LaunchDefaultSide;
+    declare metadata Meta_Launch3_Dir for Anchor = Constants::C_LaunchDefaultDir;
+    declare metadata Meta_Launch3_Cooldown for Anchor = Constants::C_LaunchDefaultCooldown;
+    declare metadata Meta_Launch3_Ground for Anchor = Constants::C_LaunchDefaultGround;
+
+    declare metadata Meta_Launch4_On for Anchor = Constants::C_LaunchDefaultOn;
+    declare metadata Meta_Launch4_Up for Anchor = Constants::C_LaunchDefaultUp;
+    declare metadata Meta_Launch4_Down for Anchor = Constants::C_LaunchDefaultDown;
+    declare metadata Meta_Launch4_Side for Anchor = Constants::C_LaunchDefaultSide;
+    declare metadata Meta_Launch4_Dir for Anchor = Constants::C_LaunchDefaultDir;
+    declare metadata Meta_Launch4_Cooldown for Anchor = Constants::C_LaunchDefaultCooldown;
+    declare metadata Meta_Launch4_Ground for Anchor = Constants::C_LaunchDefaultGround;
+
+    LaunchOn = [Meta_Launch1_On, Meta_Launch2_On, Meta_Launch3_On, Meta_Launch4_On];
+    LaunchUp = [
+        ML::Clamp(Meta_Launch1_Up, 0, 9), ML::Clamp(Meta_Launch2_Up, 0, 9),
+        ML::Clamp(Meta_Launch3_Up, 0, 9), ML::Clamp(Meta_Launch4_Up, 0, 9)
+    ];
+    LaunchDown = [
+        ML::Clamp(Meta_Launch1_Down, 0, 9), ML::Clamp(Meta_Launch2_Down, 0, 9),
+        ML::Clamp(Meta_Launch3_Down, 0, 9), ML::Clamp(Meta_Launch4_Down, 0, 9)
+    ];
+    LaunchSide = [
+        ML::Clamp(Meta_Launch1_Side, 0, 9), ML::Clamp(Meta_Launch2_Side, 0, 9),
+        ML::Clamp(Meta_Launch3_Side, 0, 9), ML::Clamp(Meta_Launch4_Side, 0, 9)
+    ];
+    LaunchDir = [
+        ML::Clamp(Meta_Launch1_Dir, 0, 7), ML::Clamp(Meta_Launch2_Dir, 0, 7),
+        ML::Clamp(Meta_Launch3_Dir, 0, 7), ML::Clamp(Meta_Launch4_Dir, 0, 7)
+    ];
+    LaunchCooldown = [
+        ML::Clamp(Meta_Launch1_Cooldown, 0, Constants::C_LaunchCooldownMax),
+        ML::Clamp(Meta_Launch2_Cooldown, 0, Constants::C_LaunchCooldownMax),
+        ML::Clamp(Meta_Launch3_Cooldown, 0, Constants::C_LaunchCooldownMax),
+        ML::Clamp(Meta_Launch4_Cooldown, 0, Constants::C_LaunchCooldownMax)
+    ];
+    LaunchGround = [Meta_Launch1_Ground, Meta_Launch2_Ground, Meta_Launch3_Ground, Meta_Launch4_Ground];
+}
+
+// Bound key = granted ability. Unbinding is what revokes it at the next checkpoint.
+//
+// A slot is only touched when its granted state actually changes: re-creating an instance is
+// not free (it resets the action's own state and costs an echo), and this runs on every section
+// change. A map or section with no launch abilities makes no action calls at all.
+Void ApplyLaunchBinds(CSmPlayer _Player) {
+    if (G_TrampolineActionId == NullId) return;
+    declare Boolean[] LaunchOn for _Player = [];
+    declare Boolean[] LaunchBound for _Player = [];
+    if (LaunchBound.count < Constants::C_LaunchKeyCount) {
+        LaunchBound = [False, False, False, False];
+    }
+
+    for (Key, 1, Constants::C_LaunchKeyCount) {
+        declare Granted = LaunchOn.count >= Key && LaunchOn[Key - 1];
+        if (Granted == LaunchBound[Key - 1]) {
+            continue;
+        }
+        LaunchBound[Key - 1] = Granted;
+        if (Granted) {
+            // The key's own model, not the shared one: its name is what identifies the key when
+            // the press echo arrives (LaunchKeyFromActionId).
+            declare ModelId = G_TrampolineActionId;
+            if (G_LaunchActionIds.count >= Key && G_LaunchActionIds[Key - 1] != NullId) {
+                ModelId = G_LaunchActionIds[Key - 1];
+            }
+            ActionLoad(_Player, LaunchSlot(Key), ModelId);
+            ActionBind(_Player, LaunchSlot(Key), LaunchInput(Key));
+            // Disarmed, so a fresh instance can't fire on whatever the slot held before
+            ActionSetVariant(_Player, LaunchSlot(Key), 0);
+        } else {
+            ActionBind(_Player, LaunchSlot(Key), CSmMode::EActionInput::None);
+        }
+    }
+}
+
+// A spawn destroys the loaded instances and their bindings (and corrupts what survives), so
+// everything the mode believes about this player's slots is stale. The section refresh that
+// follows rebinds whatever the new section grants; the pad slot is replaced here because a
+// spawn corrupts it whether or not any launch key is involved.
+Void LoadLaunchActions(CSmPlayer _Player) {
+    declare Boolean[] LaunchBound for _Player = [];
+    declare Integer[] LaunchArmedSlots for _Player = [];
+    LaunchBound = [False, False, False, False];
+    LaunchArmedSlots = [];
+    LoadTrampolineAction(_Player);
+}
+
+// Open the window in which a blast may push players (G_LastUsePvPWeapons keeps the "used PvP
+// weapons" run-stamp suppressed — a mode-sanctioned launch is not player PvP). Opened at the
+// safety cap; the fire echo collapses it to a short tail once the blast lands.
+Void OpenLaunchPvPWindow() {
+    if (G_TrampolinePvPWindowEnd <= 0) {
+        G_TrampolinePvPRestore = UsePvPWeapons;
+    }
+    G_TrampolinePvPWindowEnd = Now + Constants::C_TrampolinePvPMaxMs;
+    UsePvPWeapons = True;
+    G_LastUsePvPWeapons = True;
+}
+
+// Arm one launch: open the PvP window, remember which slot is waiting to fire, then hand the
+// variant to the action.
+Void ArmLaunch(CSmPlayer _Player, Integer _SlotIndex, Integer _Variant) {
+    OpenLaunchPvPWindow();
+    G_TrampolinePvPInFlight += 1;
+
+    declare Integer[] LaunchArmedSlots for _Player = [];
+    LaunchArmedSlots.add(_SlotIndex);
+
+    ActionSetVariant(_Player, LaunchSlot(_SlotIndex), _Variant);
+}
+
+// A fire echo resolves the oldest armed slot (launches fire in the order they were armed).
+// Falling back to the pad slot keeps an echo with nothing queued harmless.
+Void DisarmLaunch(CSmPlayer _Player) {
+    declare Integer[] LaunchArmedSlots for _Player = [];
+    declare SlotIndex = 0;
+    if (LaunchArmedSlots.count > 0) {
+        SlotIndex = LaunchArmedSlots[0];
+        LaunchArmedSlots.removekey(0);
+    }
+    ActionSetVariant(_Player, LaunchSlot(SlotIndex), 0);
+}
+
+// A granted key was pressed: check the section's gates, then arm that key's slot exactly the
+// way a pad touch arms Slot_D.
+Void TryLaunchOnKey(CSmPlayer _Player, Integer _Key) {
+    if (_Player.SpawnStatus != CSmPlayer::ESpawnStatus::Spawned) {
+        return;
+    }
+
+    declare Boolean[] LaunchOn for _Player = [];
+    if (LaunchOn.count < _Key || !LaunchOn[_Key - 1]) {
+        return;
+    }
+
+    declare Integer[] LaunchUp for _Player = [];
+    declare Integer[] LaunchDown for _Player = [];
+    declare Integer[] LaunchSide for _Player = [];
+    declare Integer[] LaunchDir for _Player = [];
+    declare Integer[] LaunchCooldown for _Player = [];
+    declare Boolean[] LaunchGround for _Player = [];
+    declare Integer[] LaunchReadyAt for _Player = [];
+    declare Index = _Key - 1;
+
+    if (LaunchGround[Index] && !_Player.IsTouchingGround) {
+        return;
+    }
+    if (Now < LaunchReadyAt[Index]) {
+        return;
+    }
+
+    // Policy: optionally suppress the down blast when an up blast fires too
+    declare LaunchDownStrength = LaunchDown[Index];
+    if (!Constants::C_TrampolineAllowBothVertical && LaunchUp[Index] > 0) {
+        LaunchDownStrength = 0;
+    }
+    if (LaunchUp[Index] <= 0 && LaunchDownStrength <= 0 && LaunchSide[Index] <= 0) {
+        return;
+    }
+
+    // Encoding v3 (must match the action): the relative base makes the dir digit a 45 deg
+    // step from the player's own aim instead of a world compass direction, so the launch
+    // follows wherever they look. base + up*1000 + down*100 + dir*10 + side
+    declare Steps = LaunchRelativeSteps(LaunchDir[Index]);
+    declare LaunchVariant = Constants::C_TrampolineVariantBaseRelative
+        + LaunchUp[Index] * 1000 + LaunchDownStrength * 100 + Steps * 10 + LaunchSide[Index];
+    // Fire through the pad slot by default (see C_LaunchFireOnPadSlot): a key launch is the
+    // same launch a pad fires, so the key slots only need to carry the bind.
+    declare FireSlot = _Key;
+    if (Constants::C_LaunchFireOnPadSlot) {
+        FireSlot = 0;
+    }
+    ArmLaunch(_Player, FireSlot, LaunchVariant);
+    LaunchReadyAt[Index] = Now + LaunchCooldown[Index];
 }
 
 Void CreateUI(Boolean _Replace) {
